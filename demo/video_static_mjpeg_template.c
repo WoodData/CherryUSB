@@ -4,8 +4,20 @@
 
 #define VIDEO_IN_EP 0x81
 
-#define MAX_PAYLOAD_SIZE  2048
-#define VIDEO_PACKET_SIZE (unsigned int)(((MAX_PAYLOAD_SIZE / 2)) | (0x01 << 11))
+#ifdef CONFIG_USB_HS
+#define MAX_PAYLOAD_SIZE  1024 // for high speed with one transcations every one micro frame
+#define VIDEO_PACKET_SIZE (unsigned int)(((MAX_PAYLOAD_SIZE / 1)) | (0x00 << 11))
+
+// #define MAX_PAYLOAD_SIZE  2048 // for high speed with two transcations every one micro frame
+// #define VIDEO_PACKET_SIZE (unsigned int)(((MAX_PAYLOAD_SIZE / 2)) | (0x01 << 11))
+
+// #define MAX_PAYLOAD_SIZE  3072 // for high speed with three transcations every one micro frame
+// #define VIDEO_PACKET_SIZE (unsigned int)(((MAX_PAYLOAD_SIZE / 3)) | (0x02 << 11))
+
+#else
+#define MAX_PAYLOAD_SIZE  256
+#define VIDEO_PACKET_SIZE (unsigned int)(((MAX_PAYLOAD_SIZE / 1)) | (0x00 << 11))
+#endif
 
 #define WIDTH  (unsigned int)(640)
 #define HEIGHT (unsigned int)(480)
@@ -38,7 +50,7 @@
 #define USBD_MAX_POWER     100
 #define USBD_LANGID_STRING 1033
 
-USB_DESC_SECTION const uint8_t video_descriptor[] = {
+const uint8_t video_descriptor[] = {
     USB_DEVICE_DESCRIPTOR_INIT(USB_2_0, 0x00, 0x00, 0x00, USBD_VID, USBD_PID, 0x0001, 0x01),
     USB_CONFIG_DESCRIPTOR_INIT(USB_VIDEO_DESC_SIZ, 0x02, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
     VIDEO_VC_DESCRIPTOR_INIT(0x00, 0, 0x0100, VC_TERMINAL_SIZ, 48000000, 0x02),
@@ -134,14 +146,13 @@ volatile bool tx_flag = 0;
 void usbd_video_open(uint8_t intf)
 {
     tx_flag = 1;
-    MSG("OPEN\r\n");
+    USB_LOG_RAW("OPEN\r\n");
 }
 void usbd_video_close(uint8_t intf)
 {
-    MSG("CLOSE\r\n");
+    USB_LOG_RAW("CLOSE\r\n");
     tx_flag = 0;
 }
-
 
 static usbd_class_t video_class;
 static usbd_interface_t video_control_intf;
@@ -173,11 +184,17 @@ uint8_t packet_buffer[10 * 1024];
 void video_test()
 {
     uint32_t out_len;
-
+    uint32_t packets;
     while (1) {
         if (tx_flag) {
-            usbd_video_mjpeg_payload_fill((uint8_t *)jpeg_data, sizeof(jpeg_data), packet_buffer, &out_len);
-            usbd_ep_write(0x81, packet_buffer, out_len, NULL);
+            packets = usbd_video_mjpeg_payload_fill((uint8_t *)jpeg_data, sizeof(jpeg_data), packet_buffer, &out_len);
+            for (uint32_t i = 0; i < packets; i++) {
+                if (i == (packets - 1)) {
+                    usbd_ep_write(VIDEO_IN_EP, &packet_buffer[i * MAX_PAYLOAD_SIZE], out_len - (packets - 1) * MAX_PAYLOAD_SIZE, NULL);
+                } else {
+                    usbd_ep_write(VIDEO_IN_EP, &packet_buffer[i * MAX_PAYLOAD_SIZE], MAX_PAYLOAD_SIZE, NULL);
+                }
+            }
         }
     }
 }
