@@ -77,7 +77,6 @@ static void usbh_hid_devno_free(struct usbh_hid *hid_class)
 static int usbh_hid_get_report_descriptor(struct usbh_hid *hid_class, uint8_t *buffer)
 {
     struct usb_setup_packet *setup = hid_class->hport->setup;
-    int ret;
 
     setup->bmRequestType = USB_REQUEST_DIR_IN | USB_REQUEST_STANDARD | USB_REQUEST_RECIPIENT_INTERFACE;
     setup->bRequest = USB_REQUEST_GET_DESCRIPTOR;
@@ -91,7 +90,6 @@ static int usbh_hid_get_report_descriptor(struct usbh_hid *hid_class, uint8_t *b
 int usbh_hid_set_idle(struct usbh_hid *hid_class, uint8_t report_id, uint8_t duration)
 {
     struct usb_setup_packet *setup = hid_class->hport->setup;
-    int ret;
 
     setup->bmRequestType = USB_REQUEST_DIR_OUT | USB_REQUEST_CLASS | USB_REQUEST_RECIPIENT_INTERFACE;
     setup->bRequest = HID_REQUEST_SET_IDLE;
@@ -99,18 +97,12 @@ int usbh_hid_set_idle(struct usbh_hid *hid_class, uint8_t report_id, uint8_t dur
     setup->wIndex = (duration << 8) | hid_class->intf;
     setup->wLength = 0;
 
-    ret = usbh_control_transfer(hid_class->hport->ep0, setup, NULL);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return 0;
+    return usbh_control_transfer(hid_class->hport->ep0, setup, NULL);
 }
 
 int usbh_hid_get_idle(struct usbh_hid *hid_class, uint8_t *buffer)
 {
     struct usb_setup_packet *setup = hid_class->hport->setup;
-    int ret;
 
     setup->bmRequestType = USB_REQUEST_DIR_IN | USB_REQUEST_CLASS | USB_REQUEST_RECIPIENT_INTERFACE;
     setup->bRequest = HID_REQUEST_GET_IDLE;
@@ -118,12 +110,7 @@ int usbh_hid_get_idle(struct usbh_hid *hid_class, uint8_t *buffer)
     setup->wIndex = hid_class->intf;
     setup->wLength = 1;
 
-    ret = usbh_control_transfer(hid_class->hport->ep0, setup, buffer);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return 0;
+    return usbh_control_transfer(hid_class->hport->ep0, setup, buffer);
 }
 
 int usbh_hid_connect(struct usbh_hubport *hport, uint8_t intf)

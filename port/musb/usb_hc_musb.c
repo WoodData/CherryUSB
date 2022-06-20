@@ -129,8 +129,8 @@
 
 #define USB_FIFO_BASE(ep_idx) (USB_BASE + MUSB_FIFO_OFFSET + 0x4 * ep_idx)
 
-#ifndef CONIFG_USB_MUSB_EP_NUM
-#define CONIFG_USB_MUSB_EP_NUM 5
+#ifndef CONIFG_USB_MUSB_PIPE_NUM
+#define CONIFG_USB_MUSB_PIPE_NUM 5
 #endif
 
 typedef enum {
@@ -143,10 +143,10 @@ typedef enum {
     USB_EP0_STATE_IN_STATUS_C, /**< IN DATA */
 } ep0_state_t;
 
-struct usb_musb_chan {
+struct musb_pipe {
     uint8_t ep_idx;
-    bool inuse; /* True: This channel is "in use" */
-    bool in;    /* True: IN endpoint */
+    bool enable; /* True: start transfer */
+    bool in;     /* True: IN endpoint */
     uint16_t mps;
     uint8_t interval; /* Polling interval */
     uint8_t speed;
@@ -154,37 +154,36 @@ struct usb_musb_chan {
     volatile uint32_t buflen;
     volatile uint16_t xfrd; /* Bytes transferred (at end of transfer) */
     volatile int result;    /* The result of the transfer */
-    struct usbh_hubport *hport;
     volatile bool waiter;   /* True: Thread is waiting for a channel event */
     usb_osal_sem_t waitsem; /* Channel wait semaphore */
 #ifdef CONFIG_USBHOST_ASYNCH
     usbh_asynch_callback_t callback; /* Transfer complete callback */
     void *arg;                       /* Argument that accompanies the callback */
 #endif
+    struct usbh_hubport *hport;
 };
 
-struct usb_musb_priv {
-    struct usb_musb_chan chan[CONIFG_USB_MUSB_EP_NUM][CONFIG_USBHOST_PIPE_NUM];
-    volatile struct usb_musb_chan *active_chan[CONIFG_USB_MUSB_EP_NUM];
-    usb_osal_mutex_t exclsem[CONIFG_USB_MUSB_EP_NUM]; /* Support mutually exclusive access */
-} g_usbhost;
+struct musb_hcd {
+    struct musb_pipe chan[CONIFG_USB_MUSB_PIPE_NUM][2]; /* Support Bidirectional ep */
+    usb_osal_mutex_t exclsem[CONIFG_USB_MUSB_PIPE_NUM]; /* Support mutually exclusive access */
+} g_musb_hcd;
 
 static volatile uint8_t usb_ep0_state = USB_EP0_STATE_SETUP;
 volatile uint8_t ep0_outlen = 0;
 
 /* get current active ep */
-static uint8_t USBC_GetActiveEp(void)
+static uint8_t musb_get_active_ep(void)
 {
     return HWREGB(USB_BASE + MUSB_EPIDX_OFFSET);
 }
 
 /* set the active ep */
-static void USBC_SelectActiveEp(uint8_t ep_index)
+static void musb_set_active_ep(uint8_t ep_index)
 {
     HWREGB(USB_BASE + MUSB_EPIDX_OFFSET) = ep_index;
 }
 
-static void usb_musb_fifo_flush(uint8_t ep)
+static void musb_fifo_flush(uint8_t ep)
 {
     uint8_t ep_idx = ep & 0x7f;
     if (ep_idx == 0) {
@@ -201,7 +200,7 @@ static void usb_musb_fifo_flush(uint8_t ep)
     }
 }
 
-static void usb_musb_write_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
+static void musb_write_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
 {
     uint32_t *buf32;
     uint8_t *buf8;
@@ -232,7 +231,7 @@ static void usb_musb_write_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
     }
 }
 
-static void usb_musb_read_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
+static void musb_read_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
 {
     uint32_t *buf32;
     uint8_t *buf8;
@@ -264,48 +263,7 @@ static void usb_musb_read_packet(uint8_t ep_idx, uint8_t *buffer, uint16_t len)
 }
 
 /****************************************************************************
- * Name: usb_synopsys_chan_alloc
- *
- * Description:
- *   Allocate a channel.
- *
- ****************************************************************************/
-static int usb_musb_chan_alloc(uint8_t ep_idx)
-{
-    int chidx;
-
-    /* Search the table of channels */
-
-    for (chidx = 0; chidx < CONFIG_USBHOST_PIPE_NUM; chidx++) {
-        /* Is this channel available? */
-        if (!g_usbhost.chan[ep_idx][chidx].inuse) {
-            /* Yes... make it "in use" and return the index */
-
-            g_usbhost.chan[ep_idx][chidx].inuse = true;
-            return chidx;
-        }
-    }
-
-    /* All of the channels are "in-use" */
-
-    return -EBUSY;
-}
-
-/****************************************************************************
- * Name: usb_synopsys_chan_free
- *
- * Description:
- *   Free a previoiusly allocated channel.
- *
- ****************************************************************************/
-static void usb_musb_chan_free(struct usb_musb_chan *chan)
-{
-    /* Mark the channel available */
-    chan->inuse = false;
-}
-
-/****************************************************************************
- * Name: usb_musb_chan_waitsetup
+ * Name: musb_pipe_waitsetup
  *
  * Description:
  *   Set the request for the transfer complete event well BEFORE enabling
@@ -319,7 +277,7 @@ static void usb_musb_chan_free(struct usb_musb_chan *chan)
  *
  ****************************************************************************/
 
-static int usb_musb_chan_waitsetup(struct usb_musb_chan *chan)
+static int musb_pipe_waitsetup(struct musb_pipe *chan)
 {
     size_t flags;
     int ret = -ENODEV;
@@ -333,8 +291,8 @@ static int usb_musb_chan_waitsetup(struct usb_musb_chan *chan)
        * when either (1) the device is disconnected, or (2) the transfer
        * completed.
        */
-        g_usbhost.active_chan[chan->ep_idx] = chan;
         chan->waiter = true;
+        chan->enable = true;
         chan->result = -EBUSY;
         chan->xfrd = 0;
 #ifdef CONFIG_USBHOST_ASYNCH
@@ -348,7 +306,7 @@ static int usb_musb_chan_waitsetup(struct usb_musb_chan *chan)
 }
 
 /****************************************************************************
- * Name: usb_musb_chan_asynchsetup
+ * Name: musb_pipe_asynchsetup
  *
  * Description:
  *   Set the request for the transfer complete event well BEFORE enabling
@@ -363,7 +321,7 @@ static int usb_musb_chan_waitsetup(struct usb_musb_chan *chan)
  ****************************************************************************/
 
 #ifdef CONFIG_USBHOST_ASYNCH
-static int usb_musb_chan_asynchsetup(struct usb_musb_chan *chan, usbh_asynch_callback_t callback, void *arg)
+static int musb_pipe_asynchsetup(struct musb_pipe *chan, usbh_asynch_callback_t callback, void *arg)
 {
     size_t flags;
     int ret = -ENODEV;
@@ -376,8 +334,8 @@ static int usb_musb_chan_asynchsetup(struct usb_musb_chan *chan, usbh_asynch_cal
        * when either (1) the device is disconnected, or (2) the transfer
        * completed.
        */
-        g_usbhost.active_chan[chan->ep_idx] = chan;
         chan->waiter = false;
+        chan->enable = true;
         chan->result = -EBUSY;
         chan->xfrd = 0;
         chan->callback = callback;
@@ -391,7 +349,7 @@ static int usb_musb_chan_asynchsetup(struct usb_musb_chan *chan, usbh_asynch_cal
 #endif
 
 /****************************************************************************
- * Name: usb_musb_chan_wait
+ * Name: musb_pipe_wait
  *
  * Description:
  *   Wait for a transfer on a channel to complete.
@@ -401,7 +359,7 @@ static int usb_musb_chan_asynchsetup(struct usb_musb_chan *chan, usbh_asynch_cal
  *
  ****************************************************************************/
 
-static int usb_musb_chan_wait(struct usb_musb_chan *chan, uint32_t timeout)
+static int musb_pipe_wait(struct musb_pipe *chan, uint32_t timeout)
 {
     int ret;
 
@@ -429,7 +387,7 @@ static int usb_musb_chan_wait(struct usb_musb_chan *chan, uint32_t timeout)
 }
 
 /****************************************************************************
- * Name: usb_musb_chan_wakeup
+ * Name: musb_pipe_wakeup
  *
  * Description:
  *   A channel transfer has completed... wakeup any threads waiting for the
@@ -441,14 +399,13 @@ static int usb_musb_chan_wait(struct usb_musb_chan *chan, uint32_t timeout)
  *
  ****************************************************************************/
 
-static void usb_musb_chan_wakeup(struct usb_musb_chan *chan)
+static void musb_pipe_wakeup(struct musb_pipe *chan)
 {
     usbh_asynch_callback_t callback;
     void *arg;
     int nbytes;
 
-    g_usbhost.active_chan[chan->ep_idx] = NULL;
-
+    chan->enable = false;
     /* Is the transfer complete? */
     if (chan->waiter) {
         /* Wake'em up! */
@@ -478,14 +435,27 @@ __WEAK void usb_hc_low_level_init(void)
 {
 }
 
-int usb_hc_init(void)
+int usb_hc_sw_init(void)
+{
+    memset(&g_musb_hcd, 0, sizeof(struct musb_hcd));
+
+    for (uint8_t i = 0; i < CONIFG_USB_MUSB_PIPE_NUM; i++) {
+        g_musb_hcd.exclsem[i] = usb_osal_mutex_create();
+        g_musb_hcd.chan[i][0].waitsem = usb_osal_sem_create(0);
+        g_musb_hcd.chan[i][1].waitsem = usb_osal_sem_create(0);
+    }
+
+    return 0;
+}
+
+int usb_hc_hw_init(void)
 {
     uint8_t regval;
     uint32_t fifo_offset = 0;
 
     usb_hc_low_level_init();
 
-    USBC_SelectActiveEp(0);
+    musb_set_active_ep(0);
     HWREGB(USB_BASE + MUSB_IND_TXINTERVAL_OFFSET) = 0;
     HWREGB(USB_BASE + MUSB_TXFIFOSZ_OFFSET) = USB_TXFIFOSZ_SIZE_64;
     HWREGH(USB_BASE + MUSB_TXFIFOADD_OFFSET) = 0;
@@ -493,17 +463,13 @@ int usb_hc_init(void)
     HWREGH(USB_BASE + MUSB_RXFIFOADD_OFFSET) = 0;
     fifo_offset += 64;
 
-    for (uint8_t i = 1; i < CONIFG_USB_MUSB_EP_NUM; i++) {
-        USBC_SelectActiveEp(i);
+    for (uint8_t i = 1; i < CONIFG_USB_MUSB_PIPE_NUM; i++) {
+        musb_set_active_ep(i);
         HWREGB(USB_BASE + MUSB_TXFIFOSZ_OFFSET) = USB_TXFIFOSZ_SIZE_512;
         HWREGH(USB_BASE + MUSB_TXFIFOADD_OFFSET) = fifo_offset;
         HWREGB(USB_BASE + MUSB_RXFIFOSZ_OFFSET) = USB_TXFIFOSZ_SIZE_512;
         HWREGH(USB_BASE + MUSB_RXFIFOADD_OFFSET) = fifo_offset;
         fifo_offset += 512;
-    }
-
-    for (uint8_t i = 0; i < CONIFG_USB_MUSB_EP_NUM; i++) {
-        g_usbhost.exclsem[i] = usb_osal_mutex_create();
     }
 
     /* Enable USB interrupts */
@@ -520,7 +486,7 @@ int usb_hc_init(void)
     HWREGB(USB_BASE + MUSB_DEVCTL_OFFSET) |= USB_DEVCTL_SESSION;
 
 #ifdef CONFIG_USB_MUSB_SUNXI
-    USBC_SelectActiveEp(0);
+    musb_set_active_ep(0);
     HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_CSRL0_TXRDY;
 #endif
     return 0;
@@ -562,9 +528,9 @@ uint8_t usbh_get_port_speed(const uint8_t port)
 int usbh_ep0_reconfigure(usbh_epinfo_t ep, uint8_t dev_addr, uint8_t ep_mps, uint8_t speed)
 {
     int ret;
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
+    struct musb_pipe *chan = (struct musb_pipe *)ep;
 
-    ret = usb_osal_mutex_take(g_usbhost.exclsem[0]);
+    ret = usb_osal_mutex_take(g_musb_hcd.exclsem[0]);
     if (ret < 0) {
         return ret;
     }
@@ -580,45 +546,46 @@ int usbh_ep0_reconfigure(usbh_epinfo_t ep, uint8_t dev_addr, uint8_t ep_mps, uin
         chan->speed = USB_TYPE0_SPEED_LOW;
     }
 
-    usb_osal_mutex_give(g_usbhost.exclsem[0]);
+    usb_osal_mutex_give(g_musb_hcd.exclsem[0]);
     return ret;
 }
 
 int usbh_ep_alloc(usbh_epinfo_t *ep, const struct usbh_endpoint_cfg *ep_cfg)
 {
     struct usbh_hubport *hport;
-    struct usb_musb_chan *chan;
-    uint32_t chidx;
+    struct musb_pipe *chan;
     uint8_t ep_idx = 0;
     uint8_t old_ep_index;
 
     hport = ep_cfg->hport;
 
     ep_idx = ep_cfg->ep_addr & 0x7f;
-    old_ep_index = USBC_GetActiveEp();
-    USBC_SelectActiveEp(ep_idx);
+
+    if (ep_idx > CONIFG_USB_MUSB_PIPE_NUM) {
+        return -1;
+    }
+
+    old_ep_index = musb_get_active_ep();
+    musb_set_active_ep(ep_idx);
+
+    if (ep_cfg->ep_addr & 0x80) {
+        chan = &g_musb_hcd.chan[ep_idx][1];
+        chan->in = true;
+    } else {
+        chan = &g_musb_hcd.chan[ep_idx][0];
+        chan->in = false;
+    }
+
+    chan->enable = false;
+    chan->ep_idx = ep_idx;
 
     if (ep_cfg->ep_type == USB_ENDPOINT_TYPE_CONTROL) {
-        chidx = usb_musb_chan_alloc(0);
-        chan = &g_usbhost.chan[0][chidx];
-        memset(chan, 0, sizeof(struct usb_musb_chan));
-        chan->inuse = true;
-        chan->ep_idx = 0;
         chan->interval = 0;
         chan->mps = ep_cfg->ep_mps;
         chan->hport = hport;
 
-        chan->waitsem = usb_osal_sem_create(0);
-
         *ep = (usbh_epinfo_t)chan;
     } else {
-        chidx = usb_musb_chan_alloc(ep_idx);
-
-        chan = &g_usbhost.chan[ep_idx][chidx];
-        memset(chan, 0, sizeof(struct usb_musb_chan));
-        chan->inuse = true;
-        chan->in = ep_cfg->ep_addr & 0x80 ? 1 : 0;
-        chan->ep_idx = ep_idx;
         chan->interval = ep_cfg->ep_interval;
         chan->mps = ep_cfg->ep_mps;
 
@@ -632,8 +599,6 @@ int usbh_ep_alloc(usbh_epinfo_t *ep, const struct usbh_endpoint_cfg *ep_cfg)
 
         chan->hport = hport;
 
-        chan->waitsem = usb_osal_sem_create(0);
-
         if (chan->in) {
             HWREGH(USB_BASE + MUSB_RXIE_OFFSET) |= (1 << ep_idx);
         } else {
@@ -643,15 +608,13 @@ int usbh_ep_alloc(usbh_epinfo_t *ep, const struct usbh_endpoint_cfg *ep_cfg)
         *ep = (usbh_epinfo_t)chan;
     }
 
-    USBC_SelectActiveEp(old_ep_index);
+    musb_set_active_ep(old_ep_index);
     return 0;
 }
 
 int usbh_ep_free(usbh_epinfo_t ep)
 {
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
-    usb_musb_chan_free(chan);
-    usb_osal_sem_delete(chan->waitsem);
+    //struct musb_pipe *chan = (struct musb_pipe *)ep;
     return 0;
 }
 
@@ -659,20 +622,20 @@ int usbh_control_transfer(usbh_epinfo_t ep, struct usb_setup_packet *setup, uint
 {
     int ret;
     uint32_t old_ep_index;
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
+    struct musb_pipe *chan = (struct musb_pipe *)ep;
 
-    ret = usb_osal_mutex_take(g_usbhost.exclsem[0]);
+    ret = usb_osal_mutex_take(g_musb_hcd.exclsem[0]);
     if (ret < 0) {
         return ret;
     }
 
-    ret = usb_musb_chan_waitsetup(chan);
+    ret = musb_pipe_waitsetup(chan);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    old_ep_index = USBC_GetActiveEp();
-    USBC_SelectActiveEp(0);
+    old_ep_index = musb_get_active_ep();
+    musb_set_active_ep(0);
 
     HWREGB(USB_TXADDR_BASE(0)) = chan->hport->dev_addr;
     HWREGB(USB_BASE + MUSB_IND_TXTYPE_OFFSET) = chan->speed;
@@ -684,7 +647,7 @@ int usbh_control_transfer(usbh_epinfo_t ep, struct usb_setup_packet *setup, uint
         HWREGB(USB_TXHUBPORT_BASE(0)) = chan->hport->parent->index - 1;
     }
 
-    usb_musb_write_packet(0, (uint8_t *)setup, 8);
+    musb_write_packet(0, (uint8_t *)setup, 8);
     ep0_outlen = 8;
     if (setup->wLength && buffer) {
         if (setup->bmRequestType & 0x80) {
@@ -699,18 +662,19 @@ int usbh_control_transfer(usbh_epinfo_t ep, struct usb_setup_packet *setup, uint
     }
 
     HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_CSRL0_TXRDY | USB_CSRL0_SETUP;
-    USBC_SelectActiveEp(old_ep_index);
+    musb_set_active_ep(old_ep_index);
 
-    ret = usb_musb_chan_wait(chan, CONFIG_USBHOST_CONTROL_TRANSFER_TIMEOUT);
+    ret = musb_pipe_wait(chan, CONFIG_USBHOST_CONTROL_TRANSFER_TIMEOUT);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    usb_osal_mutex_give(g_usbhost.exclsem[0]);
+    usb_osal_mutex_give(g_musb_hcd.exclsem[0]);
     return ret;
 errout_with_mutex:
     chan->waiter = false;
-    usb_osal_mutex_give(g_usbhost.exclsem[0]);
+    chan->enable = false;
+    usb_osal_mutex_give(g_musb_hcd.exclsem[0]);
     return ret;
 }
 
@@ -718,20 +682,20 @@ int usbh_ep_bulk_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t buflen, ui
 {
     int ret;
     uint32_t old_ep_index;
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
+    struct musb_pipe *chan = (struct musb_pipe *)ep;
 
-    ret = usb_osal_mutex_take(g_usbhost.exclsem[chan->ep_idx]);
+    ret = usb_osal_mutex_take(g_musb_hcd.exclsem[chan->ep_idx]);
     if (ret < 0) {
         return ret;
     }
 
-    ret = usb_musb_chan_waitsetup(chan);
+    ret = musb_pipe_waitsetup(chan);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    old_ep_index = USBC_GetActiveEp();
-    USBC_SelectActiveEp(chan->ep_idx);
+    old_ep_index = musb_get_active_ep();
+    musb_set_active_ep(chan->ep_idx);
 
     if (chan->in) {
         HWREGB(USB_RXADDR_BASE(chan->ep_idx)) = chan->hport->dev_addr;
@@ -767,23 +731,24 @@ int usbh_ep_bulk_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t buflen, ui
             buflen = chan->mps;
         }
 
-        usb_musb_write_packet(chan->ep_idx, chan->buffer, buflen);
+        musb_write_packet(chan->ep_idx, chan->buffer, buflen);
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) &= ~USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) |= USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_TXRDY;
     }
-    USBC_SelectActiveEp(old_ep_index);
+    musb_set_active_ep(old_ep_index);
 
-    ret = usb_musb_chan_wait(chan, timeout);
+    ret = musb_pipe_wait(chan, timeout);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 errout_with_mutex:
     chan->waiter = false;
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    chan->enable = false;
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 }
 
@@ -791,20 +756,20 @@ int usbh_ep_intr_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t buflen, ui
 {
     int ret;
     uint32_t old_ep_index;
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
+    struct musb_pipe *chan = (struct musb_pipe *)ep;
 
-    ret = usb_osal_mutex_take(g_usbhost.exclsem[chan->ep_idx]);
+    ret = usb_osal_mutex_take(g_musb_hcd.exclsem[chan->ep_idx]);
     if (ret < 0) {
         return ret;
     }
 
-    ret = usb_musb_chan_waitsetup(chan);
+    ret = musb_pipe_waitsetup(chan);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    old_ep_index = USBC_GetActiveEp();
-    USBC_SelectActiveEp(chan->ep_idx);
+    old_ep_index = musb_get_active_ep();
+    musb_set_active_ep(chan->ep_idx);
 
     if (chan->in) {
         HWREGB(USB_RXADDR_BASE(chan->ep_idx)) = chan->hport->dev_addr;
@@ -840,23 +805,24 @@ int usbh_ep_intr_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t buflen, ui
             buflen = chan->mps;
         }
 
-        usb_musb_write_packet(chan->ep_idx, chan->buffer, buflen);
+        musb_write_packet(chan->ep_idx, chan->buffer, buflen);
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) &= ~USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) |= USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_TXRDY;
     }
-    USBC_SelectActiveEp(old_ep_index);
+    musb_set_active_ep(old_ep_index);
 
-    ret = usb_musb_chan_wait(chan, timeout);
+    ret = musb_pipe_wait(chan, timeout);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 errout_with_mutex:
     chan->waiter = false;
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    chan->enable = false;
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 }
 
@@ -864,24 +830,24 @@ int usbh_ep_bulk_async_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t bufl
 {
     int ret;
     uint32_t old_ep_index;
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
+    struct musb_pipe *chan = (struct musb_pipe *)ep;
 
-    if (g_usbhost.active_chan[chan->ep_idx]) {
+    if (chan->enable) {
         return -EINVAL;
     }
 
-    ret = usb_osal_mutex_take(g_usbhost.exclsem[chan->ep_idx]);
+    ret = usb_osal_mutex_take(g_musb_hcd.exclsem[chan->ep_idx]);
     if (ret < 0) {
         return ret;
     }
 
-    ret = usb_musb_chan_asynchsetup(chan, callback, arg);
+    ret = musb_pipe_asynchsetup(chan, callback, arg);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    old_ep_index = USBC_GetActiveEp();
-    USBC_SelectActiveEp(chan->ep_idx);
+    old_ep_index = musb_get_active_ep();
+    musb_set_active_ep(chan->ep_idx);
 
     if (chan->in) {
         HWREGB(USB_RXADDR_BASE(chan->ep_idx)) = chan->hport->dev_addr;
@@ -917,18 +883,19 @@ int usbh_ep_bulk_async_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t bufl
             buflen = chan->mps;
         }
 
-        usb_musb_write_packet(chan->ep_idx, chan->buffer, buflen);
+        musb_write_packet(chan->ep_idx, chan->buffer, buflen);
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) &= ~USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) |= USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_TXRDY;
     }
-    USBC_SelectActiveEp(old_ep_index);
+    musb_set_active_ep(old_ep_index);
 
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 errout_with_mutex:
-    g_usbhost.active_chan[chan->ep_idx] = NULL;
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    chan->enable = false;
+    chan->enable = false;
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 }
 
@@ -936,24 +903,24 @@ int usbh_ep_intr_async_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t bufl
 {
     int ret;
     uint32_t old_ep_index;
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
+    struct musb_pipe *chan = (struct musb_pipe *)ep;
 
-    if (g_usbhost.active_chan[chan->ep_idx]) {
+    if (chan->enable) {
         return -EINVAL;
     }
 
-    ret = usb_osal_mutex_take(g_usbhost.exclsem[chan->ep_idx]);
+    ret = usb_osal_mutex_take(g_musb_hcd.exclsem[chan->ep_idx]);
     if (ret < 0) {
         return ret;
     }
 
-    ret = usb_musb_chan_asynchsetup(chan, callback, arg);
+    ret = musb_pipe_asynchsetup(chan, callback, arg);
     if (ret < 0) {
         goto errout_with_mutex;
     }
 
-    old_ep_index = USBC_GetActiveEp();
-    USBC_SelectActiveEp(chan->ep_idx);
+    old_ep_index = musb_get_active_ep();
+    musb_set_active_ep(chan->ep_idx);
 
     if (chan->in) {
         HWREGB(USB_RXADDR_BASE(chan->ep_idx)) = chan->hport->dev_addr;
@@ -989,25 +956,26 @@ int usbh_ep_intr_async_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t bufl
             buflen = chan->mps;
         }
 
-        usb_musb_write_packet(chan->ep_idx, chan->buffer, buflen);
+        musb_write_packet(chan->ep_idx, chan->buffer, buflen);
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) &= ~USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRH_OFFSET) |= USB_TXCSRH1_MODE;
         HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_TXRDY;
     }
-    USBC_SelectActiveEp(old_ep_index);
+    musb_set_active_ep(old_ep_index);
 
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 errout_with_mutex:
-    g_usbhost.active_chan[chan->ep_idx] = NULL;
-    usb_osal_mutex_give(g_usbhost.exclsem[chan->ep_idx]);
+    chan->enable = false;
+    chan->enable = false;
+    usb_osal_mutex_give(g_musb_hcd.exclsem[chan->ep_idx]);
     return ret;
 }
 
 int usb_ep_cancel(usbh_epinfo_t ep)
 {
     size_t flags;
-    struct usb_musb_chan *chan = (struct usb_musb_chan *)ep;
+    struct musb_pipe *chan = (struct musb_pipe *)ep;
 #ifdef CONFIG_USBHOST_ASYNCH
     usbh_asynch_callback_t callback;
     void *arg;
@@ -1025,7 +993,7 @@ int usb_ep_cancel(usbh_epinfo_t ep)
     chan->xfrd = 0;
 #endif
 
-    g_usbhost.active_chan[chan->ep_idx] = NULL;
+    chan->enable = false;
     usb_osal_leave_critical_section(flags);
     /* Is there a thread waiting for this transfer to complete? */
 
@@ -1047,12 +1015,12 @@ int usb_ep_cancel(usbh_epinfo_t ep)
 void handle_ep0(void)
 {
     uint8_t ep0_status;
-    struct usb_musb_chan *chan;
+    struct musb_pipe *chan;
     int result = 0;
 
-    chan = (struct usb_musb_chan *)g_usbhost.active_chan[0];
+    chan = (struct musb_pipe *)&g_musb_hcd.chan[0][0];
 
-    USBC_SelectActiveEp(0);
+    musb_set_active_ep(0);
     ep0_status = HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET);
 
     if (ep0_status & USB_CSRL0_STALLED) {
@@ -1064,7 +1032,7 @@ void handle_ep0(void)
 
     if (ep0_status & USB_CSRL0_ERROR) {
         HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_CSRL0_ERROR;
-        usb_musb_fifo_flush(0);
+        musb_fifo_flush(0);
         usb_ep0_state = USB_EP0_STATE_SETUP;
         result = -EIO;
         goto chan_wait;
@@ -1094,7 +1062,7 @@ void handle_ep0(void)
 
                 size = MIN(size, HWREGH(USB_BASE + MUSB_IND_RXCOUNT_OFFSET));
 
-                usb_musb_read_packet(0, chan->buffer, size);
+                musb_read_packet(0, chan->buffer, size);
 
                 HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_CSRL0_RXRDY;
 
@@ -1137,7 +1105,7 @@ void handle_ep0(void)
 
             chan->xfrd += ep0_outlen;
 
-            usb_musb_write_packet(0, chan->buffer, size);
+            musb_write_packet(0, chan->buffer, size);
 
             chan->buffer += size;
             chan->buflen -= size;
@@ -1153,9 +1121,9 @@ void handle_ep0(void)
     }
     return;
 chan_wait:
-    if (chan) {
+    if (chan->enable) {
         chan->result = result;
-        usb_musb_chan_wakeup(chan);
+        musb_pipe_wakeup(chan);
     }
 }
 
@@ -1166,7 +1134,7 @@ void USBH_IRQHandler(void)
     uint32_t rxis;
     uint8_t ep_csrl_status;
     // uint8_t ep_csrh_status;
-    struct usb_musb_chan *chan;
+    struct musb_pipe *chan;
     uint8_t ep_idx;
     uint8_t old_ep_idx;
     int result = 0;
@@ -1177,7 +1145,7 @@ void USBH_IRQHandler(void)
 
     HWREGB(USB_BASE + MUSB_IS_OFFSET) = is;
 
-    old_ep_idx = USBC_GetActiveEp();
+    old_ep_idx = musb_get_active_ep();
 
     if (is & USB_IS_CONN) {
         if (usbh_get_port_connect_status(0)) {
@@ -1187,11 +1155,14 @@ void USBH_IRQHandler(void)
 
     if (is & USB_IS_DISCON) {
         if (usbh_get_port_connect_status(0) == false) {
-            for (uint8_t ep_index = 0; ep_index < CONIFG_USB_MUSB_EP_NUM; ep_index++) {
-                if (g_usbhost.active_chan[ep_index]) {
-                    chan = (struct usb_musb_chan *)g_usbhost.active_chan[ep_index];
-                    chan->result = -ENXIO;
-                    usb_musb_chan_wakeup(chan);
+            for (ep_idx = 0; ep_idx < CONIFG_USB_MUSB_PIPE_NUM; ep_idx++) {
+                for (uint8_t j = 0; j < 2; j++) {
+                    chan = &g_musb_hcd.chan[ep_idx][j];
+
+                    if (chan->waiter) {
+                        chan->result = -ENXIO;
+                        musb_pipe_wakeup(chan);
+                    }
                 }
             }
 
@@ -1225,103 +1196,104 @@ void USBH_IRQHandler(void)
         handle_ep0();
     }
 
-    while (txis) {
-        ep_idx = __builtin_ctz(txis);
-        txis &= ~(1 << ep_idx);
-        HWREGH(USB_BASE + MUSB_TXIS_OFFSET) = (1 << ep_idx);
+    for (ep_idx = 1; ep_idx < CONIFG_USB_MUSB_PIPE_NUM; ep_idx++) {
+        if (txis & (1 << ep_idx)) {
+            HWREGH(USB_BASE + MUSB_TXIS_OFFSET) = (1 << ep_idx);
 
-        chan = (struct usb_musb_chan *)g_usbhost.active_chan[ep_idx];
+            chan = &g_musb_hcd.chan[ep_idx][0];
 
-        USBC_SelectActiveEp(ep_idx);
+            musb_set_active_ep(ep_idx);
 
-        ep_csrl_status = HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET);
+            ep_csrl_status = HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET);
 
-        if (ep_csrl_status & USB_TXCSRL1_ERROR) {
-            HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_TXCSRL1_ERROR;
-            result = -EIO;
-            goto chan_wait;
-        } else if (ep_csrl_status & USB_TXCSRL1_NAKTO) {
-            HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_TXCSRL1_NAKTO;
-            result = -EBUSY;
-            goto chan_wait;
-        } else if (ep_csrl_status & USB_TXCSRL1_STALL) {
-            HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_TXCSRL1_STALL;
-            result = -EPERM;
-            goto chan_wait;
-        } else {
-            uint32_t size = chan->buflen;
-
-            if (size > chan->mps) {
-                size = chan->mps;
-            }
-
-            chan->buffer += size;
-            chan->buflen -= size;
-            chan->xfrd += size;
-
-            if (chan->buflen == 0) {
-                result = 0;
+            if (ep_csrl_status & USB_TXCSRL1_ERROR) {
+                HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_TXCSRL1_ERROR;
+                result = -EIO;
+                goto chan_wait;
+            } else if (ep_csrl_status & USB_TXCSRL1_NAKTO) {
+                HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_TXCSRL1_NAKTO;
+                result = -EBUSY;
+                goto chan_wait;
+            } else if (ep_csrl_status & USB_TXCSRL1_STALL) {
+                HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) &= ~USB_TXCSRL1_STALL;
+                result = -EPERM;
                 goto chan_wait;
             } else {
-                usb_musb_write_packet(ep_idx, chan->buffer, size);
-                HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_TXRDY;
+                uint32_t size = chan->buflen;
+
+                if (size > chan->mps) {
+                    size = chan->mps;
+                }
+
+                chan->buffer += size;
+                chan->buflen -= size;
+                chan->xfrd += size;
+
+                if (chan->buflen == 0) {
+                    result = 0;
+                    goto chan_wait;
+                } else {
+                    musb_write_packet(ep_idx, chan->buffer, size);
+                    HWREGB(USB_BASE + MUSB_IND_TXCSRL_OFFSET) = USB_TXCSRL1_TXRDY;
+                }
             }
         }
     }
 
     rxis &= HWREGH(USB_BASE + MUSB_RXIE_OFFSET);
-    while (rxis) {
-        ep_idx = __builtin_ctz(rxis);
-        rxis &= ~(1 << ep_idx);
-        HWREGH(USB_BASE + MUSB_RXIS_OFFSET) = (1 << ep_idx); // clear isr flag
+    for (ep_idx = 1; ep_idx < CONIFG_USB_MUSB_PIPE_NUM; ep_idx++) {
+        if (rxis & (1 << ep_idx)) {
+            HWREGH(USB_BASE + MUSB_RXIS_OFFSET) = (1 << ep_idx); // clear isr flag
 
-        chan = (struct usb_musb_chan *)g_usbhost.active_chan[ep_idx];
+            chan = &g_musb_hcd.chan[ep_idx][1];
 
-        USBC_SelectActiveEp(ep_idx);
+            musb_set_active_ep(ep_idx);
 
-        ep_csrl_status = HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET);
-        //ep_csrh_status = HWREGB(USB_BASE + MUSB_IND_RXCSRH_OFFSET); // todo:for iso transfer
+            ep_csrl_status = HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET);
+            //ep_csrh_status = HWREGB(USB_BASE + MUSB_IND_RXCSRH_OFFSET); // todo:for iso transfer
 
-        if (ep_csrl_status & USB_RXCSRL1_ERROR) {
-            HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_ERROR;
-            result = -EIO;
-            goto chan_wait;
-        } else if (ep_csrl_status & USB_RXCSRL1_NAKTO) {
-            HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_NAKTO;
-            result = -EBUSY;
-            goto chan_wait;
-        } else if (ep_csrl_status & USB_RXCSRL1_STALL) {
-            HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_STALL;
-            result = -EPERM;
-            goto chan_wait;
-        } else if (ep_csrl_status & USB_RXCSRL1_RXRDY) {
-            uint32_t size = chan->buflen;
-            if (size > chan->mps) {
-                size = chan->mps;
-            }
-            size = MIN(size, HWREGH(USB_BASE + MUSB_IND_RXCOUNT_OFFSET));
-
-            usb_musb_read_packet(ep_idx, chan->buffer, size);
-
-            HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_RXRDY;
-
-            chan->buffer += size;
-            chan->buflen -= size;
-            chan->xfrd += size;
-            if ((size < chan->mps) || (chan->buflen == 0)) {
-                result = 0;
+            if (ep_csrl_status & USB_RXCSRL1_ERROR) {
+                HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_ERROR;
+                result = -EIO;
                 goto chan_wait;
-            } else {
-                HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) = USB_RXCSRL1_REQPKT;
+            } else if (ep_csrl_status & USB_RXCSRL1_NAKTO) {
+                HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_NAKTO;
+                result = -EBUSY;
+                goto chan_wait;
+            } else if (ep_csrl_status & USB_RXCSRL1_STALL) {
+                HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_STALL;
+                result = -EPERM;
+                goto chan_wait;
+            } else if (ep_csrl_status & USB_RXCSRL1_RXRDY) {
+                uint32_t size = chan->buflen;
+                if (size > chan->mps) {
+                    size = chan->mps;
+                }
+                size = MIN(size, HWREGH(USB_BASE + MUSB_IND_RXCOUNT_OFFSET));
+
+                musb_read_packet(ep_idx, chan->buffer, size);
+
+                HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) &= ~USB_RXCSRL1_RXRDY;
+
+                chan->buffer += size;
+                chan->buflen -= size;
+                chan->xfrd += size;
+                if ((size < chan->mps) || (chan->buflen == 0)) {
+                    result = 0;
+                    goto chan_wait;
+                } else {
+                    HWREGB(USB_BASE + MUSB_IND_RXCSRL_OFFSET) = USB_RXCSRL1_REQPKT;
+                }
             }
         }
     }
-    USBC_SelectActiveEp(old_ep_idx);
+
+    musb_set_active_ep(old_ep_idx);
     return;
 chan_wait:
-    USBC_SelectActiveEp(old_ep_idx);
-    if (chan) {
+    musb_set_active_ep(old_ep_idx);
+    if (chan->enable) {
         chan->result = result;
-        usb_musb_chan_wakeup(chan);
+        musb_pipe_wakeup(chan);
     }
 }

@@ -25,23 +25,6 @@
 struct usbh_class_info *usbh_class_info_table_begin = NULL;
 struct usbh_class_info *usbh_class_info_table_end = NULL;
 
-#ifdef CONFIG_USBHOST_CLASS_DRIVER_EXPORT_DISBALE
-extern const struct usbh_class_info cdc_acm_class_info;
-extern const struct usbh_class_info hid_keyboard_class_info;
-extern const struct usbh_class_info hid_mouse_class_info;
-extern const struct usbh_class_info msc_class_info;
-extern const struct usbh_class_info hub_class_info;
-const struct usbh_class_info *class_info_table[] = {
-    &cdc_acm_class_info,
-    &hid_keyboard_class_info,
-    &hid_mouse_class_info,
-    &msc_class_info,
-#ifdef CONFIG_USBHOST_HUB
-    &hub_class_info,
-#endif
-};
-#endif
-
 static const char *speed_table[] = { "error speed", "low speed", "full speed", "high speed" };
 
 static const struct usbh_class_driver *usbh_find_class_driver(uint8_t class, uint8_t subcalss, uint8_t protocol, uint16_t vid, uint16_t pid);
@@ -503,6 +486,10 @@ static int usbh_enumerate(struct usbh_hubport *hport)
 
     parse_device_descriptor(hport, (struct usb_device_descriptor *)ep0_buffer, descsize);
 
+    if ((hport->parent == NULL) && (hport->speed != USB_SPEED_HIGH)) {
+        usbh_reset_port(hport->port);
+    }
+
     /* Extract the correct max packetsize from the device descriptor */
     ep_mps = ((struct usb_device_descriptor *)ep0_buffer)->bMaxPacketSize0;
 
@@ -538,22 +525,24 @@ static int usbh_enumerate(struct usbh_hubport *hport)
     /* And reconfigure EP0 with the correct address */
     usbh_ep0_reconfigure(hport->ep0, dev_addr, ep_mps, hport->speed);
 
-    /* Read the full device descriptor if hport is not in high speed*/
-    if (descsize < USB_SIZEOF_DEVICE_DESC) {
-        setup->bmRequestType = USB_REQUEST_DIR_IN | USB_REQUEST_STANDARD | USB_REQUEST_RECIPIENT_DEVICE;
-        setup->bRequest = USB_REQUEST_GET_DESCRIPTOR;
-        setup->wValue = (uint16_t)((USB_DESCRIPTOR_TYPE_DEVICE << 8) | 0);
-        setup->wIndex = 0;
-        setup->wLength = USB_SIZEOF_DEVICE_DESC;
+    /* Read the full device descriptor */
+    setup->bmRequestType = USB_REQUEST_DIR_IN | USB_REQUEST_STANDARD | USB_REQUEST_RECIPIENT_DEVICE;
+    setup->bRequest = USB_REQUEST_GET_DESCRIPTOR;
+    setup->wValue = (uint16_t)((USB_DESCRIPTOR_TYPE_DEVICE << 8) | 0);
+    setup->wIndex = 0;
+    setup->wLength = USB_SIZEOF_DEVICE_DESC;
 
-        ret = usbh_control_transfer(hport->ep0, setup, ep0_buffer);
-        if (ret < 0) {
-            USB_LOG_ERR("Failed to get full device descriptor,errorcode:%d\r\n", ret);
-            goto errout;
-        }
-
-        parse_device_descriptor(hport, (struct usb_device_descriptor *)ep0_buffer, USB_SIZEOF_DEVICE_DESC);
+    ret = usbh_control_transfer(hport->ep0, setup, ep0_buffer);
+    if (ret < 0) {
+        USB_LOG_ERR("Failed to get full device descriptor,errorcode:%d\r\n", ret);
+        goto errout;
     }
+
+    parse_device_descriptor(hport, (struct usb_device_descriptor *)ep0_buffer, USB_SIZEOF_DEVICE_DESC);
+    USB_LOG_INFO("New device found,idVendor:%04x,idProduct:%04x,bcdDevice:%04x\r\n",
+                 ((struct usb_device_descriptor *)ep0_buffer)->idVendor,
+                 ((struct usb_device_descriptor *)ep0_buffer)->idProduct,
+                 ((struct usb_device_descriptor *)ep0_buffer)->bcdDevice);
 
     /* Read the first 9 bytes of the config descriptor */
     setup->bmRequestType = USB_REQUEST_DIR_IN | USB_REQUEST_STANDARD | USB_REQUEST_RECIPIENT_DEVICE;
@@ -586,6 +575,7 @@ static int usbh_enumerate(struct usbh_hubport *hport)
     }
 
     parse_config_descriptor(hport, (struct usb_configuration_descriptor *)ep0_buffer, wTotalLength);
+    USB_LOG_INFO("The device has %d interfaces\r\n", ((struct usb_configuration_descriptor *)ep0_buffer)->bNumInterfaces);
 
 #ifdef CONFIG_USBHOST_GET_STRING_DESC
     /* Get Manufacturer string */
@@ -662,13 +652,11 @@ static int usbh_enumerate(struct usbh_hubport *hport)
             continue;
         }
         hport->config.intf[i].class_driver = class_driver;
-
-        if (hport->config.intf[i].class_driver->connect) {
-            ret = CLASS_CONNECT(hport, i);
-            if (ret < 0) {
-                ret = CLASS_DISCONNECT(hport, i);
-                goto errout;
-            }
+        USB_LOG_INFO("Loading %s class driver\r\n", class_driver->driver_name);
+        ret = CLASS_CONNECT(hport, i);
+        if (ret < 0) {
+            ret = CLASS_DISCONNECT(hport, i);
+            goto errout;
         }
     }
 
@@ -705,7 +693,7 @@ static int usbh_portchange_wait(struct usbh_hubport **hport)
             if (connport->port_change) {
                 connport->port_change = false;
                 /* debounce for port,in order to keep port connect status stability*/
-                usb_osal_msleep(25);
+                usb_osal_msleep(100);
                 if (recved_event & USBH_EVENT_CONNECTED) {
                     if (usbh_get_port_connect_status(port)) {
                         if (!connport->connected) {
@@ -715,7 +703,8 @@ static int usbh_portchange_wait(struct usbh_hubport **hport)
                             return 0;
                         }
                     }
-                } else if (recved_event & USBH_EVENT_DISCONNECTED) {
+                }
+                if (recved_event & USBH_EVENT_DISCONNECTED) {
                     if (!usbh_get_port_connect_status(port)) {
                         if (connport->connected) {
                             connport->connected = false;
@@ -745,13 +734,15 @@ static void usbh_portchange_detect_thread(void *argument)
 {
     struct usbh_hubport *hport = NULL;
 
+    usb_hc_sw_init();
+
     for (uint8_t port = USBH_HUB_PORT_START_INDEX; port <= CONFIG_USBHOST_RHPORTS; port++) {
         usbh_core_cfg.rhport[port - 1].hport.port = port;
         usbh_core_cfg.rhport[port - 1].devgen.next = 1;
         usbh_hport_activate(&usbh_core_cfg.rhport[port - 1].hport);
     }
 
-    usb_hc_init();
+    usb_hc_hw_init();
 
     while (1) {
         usbh_portchange_wait(&hport);
@@ -827,7 +818,6 @@ int usbh_initialize(void)
 
     memset(&usbh_core_cfg, 0, sizeof(struct usbh_core_priv));
 
-#ifndef CONFIG_USBHOST_CLASS_DRIVER_EXPORT_DISBALE
 #ifdef __ARMCC_VERSION /* ARM C Compiler */
     extern const int usbh_class_info$$Base;
     extern const int usbh_class_info$$Limit;
@@ -839,14 +829,9 @@ int usbh_initialize(void)
     usbh_class_info_table_begin = (struct usbh_class_info *)&_usbh_class_info_start;
     usbh_class_info_table_end = (struct usbh_class_info *)&_usbh_class_info_end;
 #endif
-#else
-    usbh_class_info_table_begin = (struct usbh_class_info *)class_info_table[0];
-    usbh_class_info_table_end = (struct usbh_class_info *)(class_info_table[0] + (sizeof(class_info_table) / sizeof(class_info_table[0])));
-#endif
 
-#ifdef CONFIG_USBHOST_HUB
     usbh_workq_initialize();
-#endif
+
     usbh_core_cfg.pscevent = usb_osal_event_create();
     if (usbh_core_cfg.pscevent == NULL) {
         return -1;
@@ -862,7 +847,9 @@ int usbh_initialize(void)
 
 int lsusb(int argc, char **argv)
 {
+#ifdef CONFIG_USBHOST_HUB
     usb_slist_t *hub_list;
+#endif
     uint8_t port;
 
     if (argc < 2) {
@@ -895,7 +882,7 @@ int lsusb(int argc, char **argv)
                 for (uint8_t i = 0; i < usbh_core_cfg.rhport[port - 1].hport.config.config_desc.bNumInterfaces; i++) {
                     if (usbh_core_cfg.rhport[port - 1].hport.config.intf[i].class_driver->driver_name) {
                         USB_LOG_RAW("    |__Port %u,Port addr:0x%02x,If %u,ClassDriver=%s\r\n", usbh_core_cfg.rhport[port - 1].hport.port, usbh_core_cfg.rhport[port - 1].hport.dev_addr,
-                               i, usbh_core_cfg.rhport[port - 1].hport.config.intf[i].class_driver->driver_name);
+                                    i, usbh_core_cfg.rhport[port - 1].hport.config.intf[i].class_driver->driver_name);
                     }
                 }
             }
@@ -912,7 +899,7 @@ int lsusb(int argc, char **argv)
                     for (uint8_t i = 0; i < hub_class->child[port - 1].config.config_desc.bNumInterfaces; i++) {
                         if (hub_class->child[port - 1].config.intf[i].class_driver->driver_name) {
                             USB_LOG_RAW("    |__Port %u,Port addr:0x%02x,If %u,ClassDriver=%s\r\n", hub_class->child[port - 1].port, hub_class->child[port - 1].dev_addr,
-                                   i, hub_class->child[port - 1].config.intf[i].class_driver->driver_name);
+                                        i, hub_class->child[port - 1].config.intf[i].class_driver->driver_name);
                         }
                     }
                 }
@@ -923,7 +910,7 @@ int lsusb(int argc, char **argv)
         for (port = USBH_HUB_PORT_START_INDEX; port <= CONFIG_USBHOST_RHPORTS; port++) {
             if (usbh_core_cfg.rhport[port - 1].hport.connected) {
                 USB_LOG_RAW("Hub %02u,Port %u,Port addr:0x%02x,VID:PID 0x%04x:0x%04x\r\n", USBH_ROOT_HUB_INDEX, usbh_core_cfg.rhport[port - 1].hport.port, usbh_core_cfg.rhport[port - 1].hport.dev_addr,
-                       usbh_core_cfg.rhport[port - 1].hport.device_desc.idVendor, usbh_core_cfg.rhport[port - 1].hport.device_desc.idProduct);
+                            usbh_core_cfg.rhport[port - 1].hport.device_desc.idVendor, usbh_core_cfg.rhport[port - 1].hport.device_desc.idProduct);
                 usbh_print_hubport_info(&usbh_core_cfg.rhport[port - 1].hport);
             }
         }
@@ -935,7 +922,7 @@ int lsusb(int argc, char **argv)
             for (port = USBH_HUB_PORT_START_INDEX; port <= hub_class->nports; port++) {
                 if (hub_class->child[port - 1].connected) {
                     USB_LOG_RAW("Hub %02u,Port %u,Port addr:0x%02x,VID:PID 0x%04x:0x%04x\r\n", hub_class->index, hub_class->child[port - 1].port, hub_class->child[port - 1].dev_addr,
-                           hub_class->child[port - 1].device_desc.idVendor, hub_class->child[port - 1].device_desc.idProduct);
+                                hub_class->child[port - 1].device_desc.idVendor, hub_class->child[port - 1].device_desc.idProduct);
                     usbh_print_hubport_info(&hub_class->child[port - 1]);
                 }
             }
@@ -948,7 +935,9 @@ int lsusb(int argc, char **argv)
 
 struct usbh_hubport *usbh_find_hubport(uint8_t dev_addr)
 {
+#ifdef CONFIG_USBHOST_HUB
     usb_slist_t *hub_list;
+#endif
     uint8_t port;
 
     for (port = USBH_HUB_PORT_START_INDEX; port <= CONFIG_USBHOST_RHPORTS; port++) {
@@ -977,7 +966,9 @@ struct usbh_hubport *usbh_find_hubport(uint8_t dev_addr)
 
 void *usbh_find_class_instance(const char *devname)
 {
+#ifdef CONFIG_USBHOST_HUB
     usb_slist_t *hub_list;
+#endif
     struct usbh_hubport *hport;
     uint8_t port;
 
