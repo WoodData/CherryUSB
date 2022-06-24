@@ -63,7 +63,7 @@ CherryUSB Device Stack has the following functions：
 - Support WINUSB1.0、WINUSB2.0(with BOS)
 - Support Vendor class
 
-CherryUSB Device Stack resource usage (GCC 10.2 with -O2)：
+CherryUSB Device Stack resource usage (GCC 10.2 with -O2):
 
 |   file      |  FLASH (Byte)  |  RAM (Byte)  |
 |:-----------:|:--------------:|:------------:|
@@ -92,6 +92,16 @@ CherryUSB Host Stack has the following functions：
 
 The CherryUSB Host stack also provides the lsusb function, which allows you to view information about all mounted devices, including those on external hubs, with the help of a shell plugin.
 
+CherryUSB Host Stack resource usage (GCC 10.2 with -O2):
+
+|   file        |  FLASH (Byte)  |  RAM (Byte)  |
+|:-------------:|:--------------:|:------------:|
+|usbh_core.c    |  7992          | 472          |
+|usbh_cdc_acm.c |  1208          | 4            |
+|usbh_msc.c     |  2239          | 4            |
+|usbh_hid.c     |  930           | 4            |
+|usbh_hub.c     |  3878          | 14           |
+
 ## Documentation Tutorial
 
 Quickly start, USB basic concepts, API manual, Class basic concepts and examples, see [CherryUSB Documentation Tutorial](https://cherryusb.readthedocs.io/)
@@ -112,7 +122,8 @@ USB basic concepts and how the CherryUSB Device stack is implemented, see [Cherr
 |Essemi    |  ES32F36xx | musb |[es32f369_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/es32)|
 |AllwinnerTech    |  F1C100S | musb |[cherryusb_rtt_f1c100s](https://github.com/CherryUSB/cherryusb_rtt_f1c100s)|
 |ST    |  STM32F103C8T6 | fsdev |[stm32f103_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32f103c8t6)|
-|ST    |  STM32F429IGT6 | synopsys/dwc2 |[stm32f429_device_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32f429igt6)   [stm32f429_host_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_host/stm32f429igt6)|
+|ST    |  STM32F4 | dwc2 |[stm32f429_device_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32f429igt6)   [stm32f429_host_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_host/stm32f429igt6)|
+|ST    |  STM32H7 | dwc2 |[stm32h743_device_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32h743vbt6)   [stm32h743_host_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_host/stm32h743xih6)|
 |WCH    |  CH32V307 | ch32_usbfs |[ch32v307_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/ch32/usb_device/CH32V307VCT6)|
 |WCH    |  CH57x | ch58x |[ch57x_repo](https://github.com/CherryUSB/cherryusb_ch57x)|
 |Nuvoton    |  Nuc442 | nuvoton |[nuc442_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/nuvoton/usb_device/nuc442)|
