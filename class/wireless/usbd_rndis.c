@@ -1,24 +1,7 @@
-/**
- * @file usbd_rndis.c
- * @brief
+/*
+ * Copyright (c) 2022, sakumisu
  *
- * Copyright (c) 2022 sakumisu
- *
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.  The
- * ASF licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the
- * License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
 #include "usbd_core.h"
 #include "usbd_rndis.h"
@@ -79,15 +62,7 @@ static uint8_t rndis_encapsulated_resp_buffer[CONFIG_RNDIS_RESP_BUFFER_SIZE];
 static int rndis_encapsulated_cmd_handler(uint8_t *data, uint32_t len);
 // static int rndis_encapsulated_resp_handler(uint8_t *data, uint32_t *len);
 static void rndis_notify_rsp(void);
-/**
- * @brief Handler called for Class requests not handled by the USB stack.
- *
- * @param setup    Information about the request to execute.
- * @param len       Size of the buffer.
- * @param data      Buffer containing the request result.
- *
- * @return  0 on success, negative errno code on fail.
- */
+
 static int rndis_class_request_handler(struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
 {
     switch (setup->bRequest) {

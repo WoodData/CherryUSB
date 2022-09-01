@@ -1,27 +1,10 @@
-/**
- * @file usb_mem.h
- * @brief
+/*
+ * Copyright (c) 2022, sakumisu
  *
- * Copyright (c) 2022 sakumisu
- *
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.  The
- * ASF licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the
- * License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
-#ifndef _USB_MEM_H
-#define _USB_MEM_H
+#ifndef USB_MEM_H
+#define USB_MEM_H
 
 #define usb_malloc(size) malloc(size)
 #define usb_free(ptr)    free(ptr)
@@ -35,7 +18,7 @@
 #endif
 #define USB_MEM_ALIGNX __attribute__((aligned(CONFIG_USB_ALIGN_SIZE)))
 
-#ifdef CONFIG_USB_DCACHE_ENABLE
+#if defined(CONFIG_USB_DCACHE_ENABLE) || (CONFIG_USB_ALIGN_SIZE > 4)
 static inline void *usb_iomalloc(size_t size)
 {
     void *ptr;
@@ -79,18 +62,19 @@ static inline void usb_iofree(void *ptr)
     real_ptr = (void *)*(unsigned long *)((unsigned long)ptr - sizeof(void *));
     usb_free(real_ptr);
 }
+#else
+#define usb_iomalloc(size) usb_malloc(size)
+#define usb_iofree(ptr)    usb_free(ptr)
+#endif
 
+#ifdef CONFIG_USB_DCACHE_ENABLE
 void usb_dcache_clean(uintptr_t addr, uint32_t len);
 void usb_dcache_invalidate(uintptr_t addr, uint32_t len);
 void usb_dcache_clean_invalidate(uintptr_t addr, uint32_t len);
 #else
-#define usb_iomalloc(size) usb_malloc(size)
-#define usb_iofree(ptr)    usb_free(ptr)
-
 #define usb_dcache_clean(addr, len)
 #define usb_dcache_invalidate(addr, len)
 #define usb_dcache_clean_invalidate(addr, len)
-
 #endif
 
-#endif
+#endif /* USB_MEM_H */

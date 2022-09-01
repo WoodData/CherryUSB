@@ -1,26 +1,10 @@
-/**
- * @file usbh_core.h
+/*
+ * Copyright (c) 2022, sakumisu
  *
- * Copyright (c) 2022 sakumisu
- *
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.  The
- * ASF licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the
- * License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
- *
+ * SPDX-License-Identifier: Apache-2.0
  */
-#ifndef _USBH_CORE_H
-#define _USBH_CORE_H
+#ifndef USBH_CORE_H
+#define USBH_CORE_H
 
 #include <stdbool.h>
 #include <string.h>
@@ -36,7 +20,6 @@
 #include "usb_log.h"
 #include "usb_hc.h"
 #include "usb_osal.h"
-#include "usb_workq.h"
 #include "usbh_hub.h"
 
 #ifdef __cplusplus
@@ -61,7 +44,7 @@ extern "C" {
 
 #define CLASS_CONNECT(hport, i)    ((hport)->config.intf[i].class_driver->connect(hport, i))
 #define CLASS_DISCONNECT(hport, i) ((hport)->config.intf[i].class_driver->disconnect(hport, i))
-#define CLASS_INFO_DEFINE          __attribute__((section("usbh_class_info"))) __USED __ALIGNED(1)
+#define CLASS_INFO_DEFINE          __attribute__((section(".usbh_class_info"))) __USED __ALIGNED(1)
 
 enum usbh_event_type {
     USBH_EVENT_CONNECTED = (1 << 0),
@@ -69,12 +52,12 @@ enum usbh_event_type {
 };
 
 struct usbh_class_info {
-    uint8_t match_flags;/* Used for product specific matches; range is inclusive */
-    uint8_t class;    /* Base device class code */
-    uint8_t subclass; /* Sub-class, depends on base class. Eg. */
-    uint8_t protocol; /* Protocol, depends on base class. Eg. */
-    uint16_t vid;     /* Vendor ID (for vendor/product specific devices) */
-    uint16_t pid;     /* Product ID (for vendor/product specific devices) */
+    uint8_t match_flags; /* Used for product specific matches; range is inclusive */
+    uint8_t class;       /* Base device class code */
+    uint8_t subclass;    /* Sub-class, depends on base class. Eg. */
+    uint8_t protocol;    /* Protocol, depends on base class. Eg. */
+    uint16_t vid;        /* Vendor ID (for vendor/product specific devices) */
+    uint16_t pid;        /* Product ID (for vendor/product specific devices) */
     const struct usbh_class_driver *class_driver;
 };
 
@@ -129,18 +112,17 @@ typedef struct usbh_hub {
     struct usb_hub_descriptor hub_desc;
     struct usbh_hubport child[CONFIG_USBHOST_EHPORTS];
     struct usbh_hubport *parent; /* Parent hub port */
-    struct usb_work work;
 } usbh_hub_t;
-
-void usbh_event_notify_handler(uint8_t event, uint8_t rhport);
 
 int usbh_initialize(void);
 int lsusb(int argc, char **argv);
 struct usbh_hubport *usbh_find_hubport(uint8_t dev_addr);
 void *usbh_find_class_instance(const char *devname);
+void usbh_device_mount_done_callback(struct usbh_hubport *hport);
+void usbh_device_unmount_done_callback(struct usbh_hubport *hport);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif /* USBH_CORE_H */

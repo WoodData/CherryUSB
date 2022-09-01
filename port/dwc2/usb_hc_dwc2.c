@@ -1,10 +1,6 @@
 #include "usbh_core.h"
 #include "usb_dwc2_reg.h"
 
-#ifndef CONFIG_USBHOST_HIGH_WORKQ
-#error "dwc2 host must use high workq"
-#endif
-
 #if defined(STM32F7) || defined(STM32H7)
 #ifndef CONFIG_USB_DCACHE_ENABLE
 #warning "if you enable dcache,please enable this macro"
@@ -34,12 +30,6 @@
 #define USB_OTG_HC(i)   ((USB_OTG_HostChannelTypeDef *)(USB_BASE + USB_OTG_HOST_CHANNEL_BASE + ((i)*USB_OTG_HOST_CHANNEL_SIZE)))
 #define USB_OTG_FIFO(i) *(__IO uint32_t *)(USB_BASE + USB_OTG_FIFO_BASE + ((i)*USB_OTG_FIFO_SIZE))
 
-/* This structure retains the state of one host channel.  NOTE: Since there
- * is only one channel operation active at a time, some of the fields in
- * in the structure could be moved in struct stm32_ubhost_s to achieve
- * some memory savings.
- */
-
 struct dwc2_pipe {
     uint8_t ep_addr;
     uint8_t ep_type;
@@ -50,8 +40,9 @@ struct dwc2_pipe {
     uint8_t chidx;
     bool inuse;               /* True: This channel is "in use" */
     uint8_t ep_interval;      /* Interrupt/isochronous EP polling interval */
-    uint16_t num_packets;     /* for HCTSIZx*/
-    uint32_t xferlen;         /* for HCTSIZx*/
+    uint16_t num_packets;     /* for HCTSIZx */
+    uint32_t xferlen;         /* for HCTSIZx */
+    uint8_t *buffer;          /* for dcache invalidate */
     volatile int result;      /* The result of the transfer */
     volatile uint32_t xfrd;   /* Bytes transferred (at end of transfer) */
     volatile bool waiter;     /* True: Thread is waiting for a channel event */
@@ -65,7 +56,7 @@ struct dwc2_pipe {
 
 struct dwc2_hcd {
     volatile bool connected;
-    struct usb_work work;
+    volatile bool port_enable;
     struct dwc2_pipe chan[CONFIG_USB_DWC2_PIPE_NUM];
 } g_dwc2_hcd;
 
@@ -361,64 +352,24 @@ static inline uint32_t dwc2_get_current_frame(void)
     return (USB_OTG_HOST->HFNUM & USB_OTG_HFNUM_FRNUM);
 }
 
-/****************************************************************************
- * Name: dwc2_pipe_alloc
- *
- * Description:
- *   Allocate a channel.
- *
- ****************************************************************************/
-
 static int dwc2_pipe_alloc(void)
 {
     int chidx;
 
-    /* Search the table of channels */
-
     for (chidx = 0; chidx < CONFIG_USB_DWC2_PIPE_NUM; chidx++) {
-        /* Is this channel available? */
         if (!g_dwc2_hcd.chan[chidx].inuse) {
-            /* Yes... make it "in use" and return the index */
-
             g_dwc2_hcd.chan[chidx].inuse = true;
             return chidx;
         }
     }
 
-    /* All of the channels are "in-use" */
-
     return -EBUSY;
 }
 
-/****************************************************************************
- * Name: dwc2_pipe_free
- *
- * Description:
- *   Free a previoiusly allocated channel.
- *
- ****************************************************************************/
-
 static void dwc2_pipe_free(struct dwc2_pipe *chan)
 {
-    /* Mark the channel available */
-
     chan->inuse = false;
 }
-
-/****************************************************************************
- * Name: dwc2_pipe_waitsetup
- *
- * Description:
- *   Set the request for the transfer complete event well BEFORE enabling
- *   the transfer (as soon as we are absolutely committed to the transfer).
- *   We do this to minimize race conditions.  This logic would have to be
- *   expanded if we want to have more than one packet in flight at a time!
- *
- * Assumptions:
- *   Called from a normal thread context BEFORE the transfer has been
- *   started.
- *
- ****************************************************************************/
 
 static int dwc2_pipe_waitsetup(struct dwc2_pipe *chan)
 {
@@ -427,13 +378,7 @@ static int dwc2_pipe_waitsetup(struct dwc2_pipe *chan)
 
     flags = usb_osal_enter_critical_section();
 
-    /* Is the device still connected? */
-
     if (usbh_get_port_connect_status(1)) {
-        /* Yes.. then set waiter to indicate that we expect to be informed
-       * when either (1) the device is disconnected, or (2) the transfer
-       * completed.
-       */
         chan->waiter = true;
         chan->result = -EBUSY;
         chan->xfrd = 0;
@@ -447,21 +392,6 @@ static int dwc2_pipe_waitsetup(struct dwc2_pipe *chan)
     return ret;
 }
 
-/****************************************************************************
- * Name: dwc2_pipe_asynchsetup
- *
- * Description:
- *   Set the request for the transfer complete event well BEFORE enabling
- *   the transfer (as soon as we are absolutely committed to the to avoid
- *   transfer).  We do this to minimize race conditions.  This logic would
- *   have to be expanded if we want to have more than one packet in flight
- *   at a time!
- *
- * Assumptions:
- *   Might be called from the level of an interrupt handler
- *
- ****************************************************************************/
-
 #ifdef CONFIG_USBHOST_ASYNCH
 static int dwc2_pipe_asynchsetup(struct dwc2_pipe *chan, usbh_asynch_callback_t callback, void *arg)
 {
@@ -469,14 +399,8 @@ static int dwc2_pipe_asynchsetup(struct dwc2_pipe *chan, usbh_asynch_callback_t 
     int ret = -ENODEV;
 
     flags = usb_osal_enter_critical_section();
-    /* Is the device still connected? */
 
     if (usbh_get_port_connect_status(1)) {
-        /* Yes.. then set waiter to indicate that we expect to be informed
-       * when either (1) the device is disconnected, or (2) the transfer
-       * completed.
-       */
-
         chan->waiter = false;
         chan->result = -EBUSY;
         chan->xfrd = 0;
@@ -491,27 +415,11 @@ static int dwc2_pipe_asynchsetup(struct dwc2_pipe *chan, usbh_asynch_callback_t 
 }
 #endif
 
-/****************************************************************************
- * Name: dwc2_pipe_wait
- *
- * Description:
- *   Wait for a transfer on a channel to complete.
- *
- * Assumptions:
- *   Called from a normal thread context
- *
- ****************************************************************************/
-
 static int dwc2_pipe_wait(struct dwc2_pipe *chan, uint32_t timeout)
 {
     int ret;
 
-    /* Loop, testing for an end of transfer condition.  The channel 'result'
-   * was set to EBUSY and 'waiter' was set to true before the transfer;
-   * 'waiter' will be set to false and 'result' will be set appropriately
-   * when the transfer is completed.
-   */
-
+    /* wait until timeout or sem give */
     if (chan->waiter) {
         ret = usb_osal_sem_take(chan->waitsem, timeout);
         if (ret < 0) {
@@ -519,27 +427,13 @@ static int dwc2_pipe_wait(struct dwc2_pipe *chan, uint32_t timeout)
         }
     }
 
-    /* The transfer is complete re-enable interrupts and return the result */
+    /* Sem give, check if giving from error isr */
     ret = chan->result;
-
     if (ret < 0) {
         return ret;
     }
     return chan->xfrd;
 }
-
-/****************************************************************************
- * Name: dwc2_pipe_wakeup
- *
- * Description:
- *   A channel transfer has completed... wakeup any threads waiting for the
- *   transfer to complete.
- *
- * Assumptions:
- *   This function is called from the transfer complete interrupt handler for
- *   the channel.  Interrupts are disabled.
- *
- ****************************************************************************/
 
 static void dwc2_pipe_wakeup(struct dwc2_pipe *chan)
 {
@@ -547,34 +441,29 @@ static void dwc2_pipe_wakeup(struct dwc2_pipe *chan)
     void *arg;
     int nbytes;
 
-    /* Is the transfer complete? */
-
-    if (chan->result != -EBUSY) {
-        /* Is there a thread waiting for this transfer to complete? */
-
-        if (chan->waiter) {
-            /* Wake'em up! */
-            chan->waiter = false;
-            usb_osal_sem_give(chan->waitsem);
-        }
+    if (chan->waiter) {
+        chan->waiter = false;
+        usb_osal_sem_give(chan->waitsem);
+    }
 #ifdef CONFIG_USBHOST_ASYNCH
-        /* No.. is an asynchronous callback expected when the transfer
-       * completes?
-       */
-        else if (chan->callback) {
-            callback = chan->callback;
-            arg = chan->arg;
-            nbytes = chan->xfrd;
-            chan->callback = NULL;
-            chan->arg = NULL;
-            if (chan->result < 0) {
-                nbytes = chan->result;
-            }
-
-            callback(arg, nbytes);
+    else if (chan->callback) {
+        callback = chan->callback;
+        arg = chan->arg;
+        nbytes = chan->xfrd;
+        chan->callback = NULL;
+        chan->arg = NULL;
+        if (chan->result < 0) {
+            nbytes = chan->result;
+        }
+#ifdef CONFIG_USB_DCACHE_ENABLE
+        if (((chan->ep_addr & 0x80) == 0x80) && (nbytes > 0)) {
+            usb_dcache_invalidate((uint32_t)chan->buffer, nbytes);
         }
 #endif
+        callback(arg, nbytes);
     }
+
+#endif
 }
 
 __WEAK void usb_hc_low_level_init(void)
@@ -624,8 +513,8 @@ int usb_hc_hw_init(void)
     USB_OTG_GLB->GCCFG &= ~USB_OTG_GCCFG_VBUSBSEN;
     USB_OTG_GLB->GCCFG &= ~USB_OTG_GCCFG_VBUSASEN;
 #endif
+    /*!< FS/LS PHY clock select  */
     USB_OTG_HOST->HCFG |= USB_OTG_HCFG_FSLSPCS_0;
-    usbh_reset_port(1);
 
     /* Set default Max speed support */
     USB_OTG_HOST->HCFG &= ~(USB_OTG_HCFG_FSLSS);
@@ -694,6 +583,10 @@ int usbh_reset_port(const uint8_t port)
     usb_osal_msleep(100U); /* See Note #1 */
     USB_OTG_HPRT = ((~USB_OTG_HPRT_PRST) & hprt0);
     usb_osal_msleep(10U);
+
+    while (!g_dwc2_hcd.port_enable) {
+    }
+
     return 0;
 }
 
@@ -750,6 +643,7 @@ int usbh_ep_alloc(usbh_epinfo_t *ep, const struct usbh_endpoint_cfg *ep_cfg)
 
     chan = &g_dwc2_hcd.chan[chidx];
 
+    /* store variables */
     waitsem = chan->waitsem;
     exclsem = chan->exclsem;
 
@@ -770,6 +664,7 @@ int usbh_ep_alloc(usbh_epinfo_t *ep, const struct usbh_endpoint_cfg *ep_cfg)
         chan->data_pid = HC_PID_DATA0;
     }
 
+    /* restore variables */
     chan->inuse = true;
     chan->waitsem = waitsem;
     chan->exclsem = exclsem;
@@ -1043,6 +938,7 @@ int usbh_ep_bulk_async_transfer(usbh_epinfo_t ep, uint8_t *buffer, uint32_t bufl
         usb_dcache_clean((uintptr_t)buffer, buflen);
     }
 #endif
+    chan->buffer = buffer;
     dwc2_pipe_transfer(chidx, chan->ep_addr, (uint32_t *)buffer, chan->xferlen, chan->num_packets, chan->data_pid);
 
     return 0;
@@ -1070,9 +966,7 @@ int usb_ep_cancel(usbh_epinfo_t ep)
 
     flags = usb_osal_enter_critical_section();
 
-    chan->result = -ESHUTDOWN;
 #ifdef CONFIG_USBHOST_ASYNCH
-    /* Extract the callback information */
     callback = chan->callback;
     arg = chan->arg;
     chan->callback = NULL;
@@ -1081,72 +975,19 @@ int usb_ep_cancel(usbh_epinfo_t ep)
 #endif
     usb_osal_leave_critical_section(flags);
 
-    /* Is there a thread waiting for this transfer to complete? */
-
+    /* Check if there is a thread waiting for this transfer to complete? */
     if (chan->waiter) {
-        /* Wake'em up! */
         chan->waiter = false;
         usb_osal_sem_give(chan->waitsem);
     }
 #ifdef CONFIG_USBHOST_ASYNCH
     /* No.. is an asynchronous callback expected when the transfer completes? */
     else if (callback) {
-        /* Then perform the callback */
         callback(arg, -ESHUTDOWN);
     }
 #endif
     return 0;
 }
-
-//static void usb_dwc2_rxqlvl_irq_handler(void)
-//{
-//    uint32_t pktsts;
-//    uint32_t pktcnt;
-//    uint32_t GrxstspReg;
-//    uint32_t xferSizePktCnt;
-//    uint32_t tmpreg;
-//    uint32_t ch_num;
-//    uint32_t len32b;
-//    uint32_t *pdest;
-//    struct dwc2_pipe *chan;
-
-//    GrxstspReg = USB_OTG_GLB->GRXSTSP;
-//    ch_num = GrxstspReg & USB_OTG_GRXSTSP_EPNUM;
-//    pktsts = (GrxstspReg & USB_OTG_GRXSTSP_PKTSTS) >> 17;
-//    pktcnt = (GrxstspReg & USB_OTG_GRXSTSP_BCNT) >> 4;
-
-//    chan = &g_dwc2_hcd.chan[ch_num];
-//    switch (pktsts) {
-//        case GRXSTS_PKTSTS_IN:
-//            /* Read the data into the host buffer. */
-//            if ((pktcnt > 0U) && (chan->buffer != NULL)) {
-//                len32b = ((uint32_t)pktcnt + 3U) / 4U;
-
-//                pdest = (uint32_t *)chan->buffer;
-
-//                for (uint8_t i = 0U; i < len32b; i++) {
-//                    *pdest = USB_OTG_FIFO(0U);
-//                    pdest++;
-//                }
-
-//                chan->buffer += pktcnt;
-//                chan->xfrd += pktcnt;
-//                chan->buflen -= pktcnt;
-
-//                if (chan->buflen == 0) {
-//                }
-//            }
-//            break;
-
-//        case GRXSTS_PKTSTS_DATA_TOGGLE_ERR:
-//            break;
-
-//        case GRXSTS_PKTSTS_IN_XFER_COMP:
-//        case GRXSTS_PKTSTS_CH_HALTED:
-//        default:
-//            break;
-//    }
-//}
 
 static void dwc2_inchan_irq_handler(uint8_t ch_num)
 {
@@ -1333,15 +1174,9 @@ static void dwc2_outchan_irq_handler(uint8_t ch_num)
     }
 }
 
-void dwc2_reset_handler(void *arg)
-{
-    usbh_reset_port(1);
-}
-
 static void dwc2_port_irq_handler(void)
 {
     __IO uint32_t hprt0, hprt0_dup, regval;
-    bool reset = false;
 
     /* Handle Host Port Interrupts */
     hprt0 = USB_OTG_HPRT;
@@ -1353,7 +1188,7 @@ static void dwc2_port_irq_handler(void)
     /* Check whether Port Connect detected */
     if ((hprt0 & USB_OTG_HPRT_PCDET) == USB_OTG_HPRT_PCDET) {
         if ((hprt0 & USB_OTG_HPRT_PCSTS) == USB_OTG_HPRT_PCSTS) {
-            reset = true;
+            usbh_event_notify_handler(USBH_EVENT_CONNECTED, 1);
         }
         hprt0_dup |= USB_OTG_HPRT_PCDET;
     }
@@ -1372,7 +1207,6 @@ static void dwc2_port_irq_handler(void)
                     regval &= ~USB_OTG_HCFG_FSLSPCS;
                     regval |= USB_OTG_HCFG_FSLSPCS_1;
                     USB_OTG_HOST->HCFG = regval;
-                    reset = true;
                 }
             } else {
                 USB_OTG_HOST->HFIR = 48000U;
@@ -1381,21 +1215,14 @@ static void dwc2_port_irq_handler(void)
                     regval &= ~USB_OTG_HCFG_FSLSPCS;
                     regval |= USB_OTG_HCFG_FSLSPCS_0;
                     USB_OTG_HOST->HCFG = regval;
-                    reset = true;
                 }
             }
 #endif
-            usbh_event_notify_handler(USBH_EVENT_CONNECTED, 1);
-        } else {
-            for (int chidx = 0; chidx < CONFIG_USB_DWC2_PIPE_NUM; chidx++) {
-                struct dwc2_pipe *chan;
-                chan = &g_dwc2_hcd.chan[chidx];
-                if (chan->waiter) {
-                    chan->waiter = false;
-                    usb_osal_sem_give(chan->waitsem);
-                }
+            for (uint32_t i = 0; i < 1000; i++) {
             }
-            usbh_event_notify_handler(USBH_EVENT_DISCONNECTED, 1);
+            g_dwc2_hcd.port_enable = true;
+        } else {
+            g_dwc2_hcd.port_enable = false;
         }
     }
 
@@ -1405,9 +1232,6 @@ static void dwc2_port_irq_handler(void)
     }
     /* Clear Port Interrupts */
     USB_OTG_HPRT = hprt0_dup;
-    if (reset) {
-        usb_workqueue_submit(&g_hpworkq, &g_dwc2_hcd.work, dwc2_reset_handler, NULL, 0);
-    }
 }
 
 void USBH_IRQHandler(void)
@@ -1424,13 +1248,18 @@ void USBH_IRQHandler(void)
             dwc2_port_irq_handler();
         }
         if (gint_status & USB_OTG_GINTSTS_DISCINT) {
+            for (int chidx = 0; chidx < CONFIG_USB_DWC2_PIPE_NUM; chidx++) {
+                struct dwc2_pipe *chan;
+                chan = &g_dwc2_hcd.chan[chidx];
+                if (chan->waiter) {
+                    chan->waiter = false;
+                    chan->result = -ENXIO;
+                    usb_osal_sem_give(chan->waitsem);
+                }
+            }
+            usbh_event_notify_handler(USBH_EVENT_DISCONNECTED, 1);
             USB_OTG_GLB->GINTSTS = USB_OTG_GINTSTS_DISCINT;
         }
-        //        if (gint_status & USB_OTG_GINTSTS_RXFLVL) {
-        //            USB_MASK_INTERRUPT(USB_OTG_GLB, USB_OTG_GINTSTS_RXFLVL);
-        //            usb_dwc2_rxqlvl_irq_handler();
-        //            USB_UNMASK_INTERRUPT(USB_OTG_GLB, USB_OTG_GINTSTS_RXFLVL);
-        //        }
         if (gint_status & USB_OTG_GINTSTS_HCINT) {
             chan_int = (USB_OTG_HOST->HAINT & USB_OTG_HOST->HAINTMSK) & 0xFFFFU;
             for (uint8_t i = 0U; i < CONFIG_USB_DWC2_PIPE_NUM; i++) {

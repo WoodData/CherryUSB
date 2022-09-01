@@ -14,7 +14,7 @@
 
 #define AUDIO_IN_EP 0x01
 
-#define AUDIO_FREQ 48000
+#define AUDIO_FREQ      48000
 #define HALF_WORD_BYTES 2  //2 half word (one channel)
 #define SAMPLE_BITS     16 //16 bit per channel
 
@@ -146,6 +146,7 @@ const uint8_t audio_descriptor[] = {
 #endif
     0x00
 };
+
 volatile bool tx_flag = 0;
 
 void usbd_audio_open(uint8_t intf)
@@ -159,25 +160,27 @@ void usbd_audio_close(uint8_t intf)
     tx_flag = 0;
 }
 
-static usbd_class_t audio_class;
-static usbd_interface_t audio_control_intf;
-static usbd_interface_t audio_stream_intf;
+void usbd_configure_done_callback(void)
+{
+    /* no out ep, do nothing */
+}
 
-void usbd_audio_iso_callback(uint8_t ep)
+void usbd_audio_iso_in_callback(uint8_t ep, uint32_t nbytes)
 {
 }
 
-static usbd_endpoint_t audio_in_ep = {
-    .ep_cb = usbd_audio_iso_callback,
+static struct usbd_endpoint audio_in_ep = {
+    .ep_cb = usbd_audio_iso_in_callback,
     .ep_addr = AUDIO_IN_EP
 };
 
 void audio_init()
 {
     usbd_desc_register(audio_descriptor);
-    usbd_audio_add_interface(&audio_class, &audio_control_intf);
-    usbd_audio_add_interface(&audio_class, &audio_stream_intf);
-    usbd_interface_add_endpoint(&audio_stream_intf, &audio_in_ep);
+    usbd_add_interface(usbd_audio_alloc_intf());
+    usbd_add_interface(usbd_audio_alloc_intf());
+    usbd_add_endpoint(&audio_in_ep);
+
     usbd_audio_add_entity(0x01, AUDIO_CONTROL_CLOCK_SOURCE);
     usbd_audio_add_entity(0x03, AUDIO_CONTROL_FEATURE_UNIT);
 
