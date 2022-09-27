@@ -62,7 +62,7 @@ static int hid_custom_request_handler(struct usb_setup_packet *setup, uint8_t **
     return -1;
 }
 
-static int hid_class_request_handler(struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
+static int hid_class_interface_request_handler(struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
 {
     USB_LOG_DBG("HID Class request: "
                 "bRequest 0x%02x\r\n",
@@ -90,7 +90,7 @@ static int hid_class_request_handler(struct usb_setup_packet *setup, uint8_t **d
             break;
         case HID_REQUEST_SET_IDLE:
             /* report id, duration */
-            usbh_hid_set_idle(intf_num, LO_BYTE(setup->wValue), HI_BYTE(setup->wIndex));
+            usbh_hid_set_idle(intf_num, LO_BYTE(setup->wValue), HI_BYTE(setup->wValue));
             break;
         case HID_REQUEST_SET_PROTOCOL:
             /* protocol */
@@ -113,8 +113,8 @@ struct usbd_interface *usbd_hid_alloc_intf(const uint8_t *desc, uint32_t desc_le
         return NULL;
     }
 
-    intf->class_handler = hid_class_request_handler;
-    intf->custom_handler = hid_custom_request_handler;
+    intf->class_interface_handler = hid_class_interface_request_handler;
+    intf->class_endpoint_handler = NULL;
     intf->vendor_handler = NULL;
     intf->notify_handler = NULL;
 

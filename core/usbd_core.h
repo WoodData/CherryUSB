@@ -53,13 +53,9 @@ struct usbd_endpoint {
 
 struct usbd_interface {
     usb_slist_t list;
-    /** Handler for USB Class specific commands*/
-    usbd_request_handler class_handler;
-    /** Handler for USB Vendor specific commands */
+    usbd_request_handler class_interface_handler;
+    usbd_request_handler class_endpoint_handler;
     usbd_request_handler vendor_handler;
-    /** Handler for USB custom specific commands */
-    usbd_request_handler custom_handler;
-    /** Handler for USB event notify commands */
     usbd_notify_handler notify_handler;
     const uint8_t *hid_report_descriptor;
     uint32_t hid_report_descriptor_len;
@@ -77,6 +73,7 @@ void usbd_add_endpoint(struct usbd_endpoint *ep);
 bool usb_device_is_configured(void);
 void usbd_configure_done_callback(void);
 int usbd_initialize(void);
+int usbd_deinitialize(void);
 
 #ifdef __cplusplus
 }

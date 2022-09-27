@@ -24,6 +24,8 @@ struct usbd_video_cfg_priv {
     .info[2] = { .bDescriptorSubtype = VIDEO_VC_PROCESSING_UNIT_DESCRIPTOR_SUBTYPE, .bEntityId = 0x02, .wTerminalType = 0x00 },
 };
 
+static bool head_toggle = false;
+
 static int usbd_video_control_request_handler(struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
 {
     uint8_t control_selector = (uint8_t)(setup->wValue >> 8);
@@ -659,7 +661,7 @@ static int usbd_video_stream_request_handler(struct usb_setup_packet *setup, uin
     return 0;
 }
 
-static int video_class_request_handler(struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
+static int video_class_interface_request_handler(struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
 {
     USB_LOG_DBG("Video Class request: "
                 "bRequest 0x%02x\r\n",
@@ -694,6 +696,7 @@ static void video_notify_handler(uint8_t event, void *arg)
                 usbd_video_open(intf->bInterfaceNumber);
             } else {
                 usbd_video_close(intf->bInterfaceNumber);
+                head_toggle = false;
             }
         }
 
@@ -750,8 +753,8 @@ struct usbd_interface *usbd_video_alloc_intf(uint32_t dwFrameInterval, uint32_t 
         return NULL;
     }
 
-    intf->class_handler = video_class_request_handler;
-    intf->custom_handler = NULL;
+    intf->class_interface_handler = video_class_interface_request_handler;
+    intf->class_endpoint_handler = NULL;
     intf->vendor_handler = NULL;
     intf->notify_handler = video_notify_handler;
 
@@ -770,7 +773,7 @@ uint32_t usbd_video_mjpeg_payload_fill(uint8_t *input, uint32_t input_len, uint8
 
     for (size_t i = 0; i < packets; i++) {
         output[usbd_video_cfg.probe.dwMaxPayloadTransferSize * i] = 0x02;
-        output[usbd_video_cfg.probe.dwMaxPayloadTransferSize * i + 1] ^= 0x01;
+        output[usbd_video_cfg.probe.dwMaxPayloadTransferSize * i + 1] = head_toggle;
         if (i == (packets - 1)) {
             memcpy(&output[2 + usbd_video_cfg.probe.dwMaxPayloadTransferSize * i], &input[picture_pos], last_packet_size - 2);
         } else {
@@ -778,7 +781,7 @@ uint32_t usbd_video_mjpeg_payload_fill(uint8_t *input, uint32_t input_len, uint8
             picture_pos += usbd_video_cfg.probe.dwMaxPayloadTransferSize - 2;
         }
     }
-
+    head_toggle ^= 1;
     *out_len = (input_len + 2 * packets);
     return packets;
 }

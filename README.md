@@ -4,16 +4,17 @@
 
 CherryUSB is a tiny, beautiful and portable USB host and device stack for embedded system with USB ip.
 
-![CherryUSB](./docs/asserts/usb_outline.png)
+![CherryUSB](./docs/assets/usb_outline.png)
 
 ## Why choose
 
-- More comprehensive class drivers, and class drivers are all templated, easy to learn and add independently
-- Tree programming, easy to understand the relationship between class driver and interface, endpoint, the relationship between hub, port, class; code layer by layer, call relationship at a glance, easy to understand the usb enumeration process and class driver loading
-- The use of device protocol stacks is equivalent to uart tx/rx dma, and the use of the host stack is equivalent to file opertion.
-- Standardized porting interface, as well as ip-oriented programming, eliminating the need to rewrite drivers for the same ip
-- Api less, clear classification: dcd/hcd api, registration api, command callback api
-- Streamlined code, minimal memory footprint, and the ip driver code is also streamlined to achieve the theoretical bandwidth of the usb hardware
+- Streamlined code with small memory usage which also can be further trimmed
+- Comprehensive class drivers and all master and slave class drivers are templated,making it easy for users to add new class drivers and find patterns when learning
+- The APIs available to the users are very few and clearly categorised. Device: initialisation + registration apis, command callback apis, data sending and receiving apis; Host: initialisation + lookup apis, data sending and receiving apis
+- Tree-based programming with a hierarchy of code that makes it easy for the user to sort out function call relationships, enumerations and class-driven loading processes
+- Standardised porting interface, no need to rewrite the driver for the same ip, and porting drivers are templated to make it easier for users to add new ports
+- The use of the device or host transceiver apis are equivalent to the use of the uart tx/rx dma, and there is no limit to the length
+- Capable of achieving theoretical USB hardware bandwidth
 
 ## Directoy Structure
 
@@ -66,14 +67,14 @@ CherryUSB Device Stack has the following functions：
 
 CherryUSB Device Stack resource usage (GCC 10.2 with -O2):
 
-|   file      |  FLASH (Byte)  |  RAM (Byte)  |
-|:-----------:|:--------------:|:------------:|
-|usbd_core.c  |  3045          | 373          |
-|usbd_cdc.c   |  302           | 20           |
-|usbd_msc.c   |  2452          | 132          |
-|usbd_hid.c   |  784           | 201          |
-|usbd_audio.c |  438           | 14           |
-|usbd_video.c |  402           | 4            |
+|   file        |  FLASH (Byte)  |  No Cache RAM (Byte)      |  RAM (Byte)   |  Heap (Byte)                      |
+|:-------------:|:--------------:|:-------------------------:|:-------------:|:---------------------------------:|
+|usbd_core.c    |  3263          | 384                       | 17            | 0                                 |
+|usbd_cdc.c     |  490           | 0                         | 0             | sizeof(struct usbd_interface) * x |
+|usbd_msc.c     |  2772          | 128 + 512(default)        | 16            | sizeof(struct usbd_interface) * x |
+|usbd_hid.c     |  501           | 0                         | 0             | sizeof(struct usbd_interface) * x |
+|usbd_audio.c   |  1208          | 0                         | 4             | sizeof(struct usbd_interface) * x |
+|usbd_video.c   |  2272          | 0                         | 82            | sizeof(struct usbd_interface) * x |
 
 ## Host Stack Overview
 
@@ -88,6 +89,7 @@ CherryUSB Host Stack has the following functions：
 - Support Communication Device Class (CDC)
 - Support Human Interface Device (HID)
 - Support Mass Storage Class (MSC)
+- Support USB VIDEO CLASS (UVC1.0, only supports ehci)
 - Support Remote NDIS (RNDIS)
 - Support Vendor class
 
@@ -95,13 +97,23 @@ The CherryUSB Host stack also provides the lsusb function, which allows you to v
 
 CherryUSB Host Stack resource usage (GCC 10.2 with -O2):
 
-|   file        |  FLASH (Byte)  |  RAM (Byte)  |
-|:-------------:|:--------------:|:------------:|
-|usbh_core.c    |  7992          | 472          |
-|usbh_cdc_acm.c |  1208          | 4            |
-|usbh_msc.c     |  2239          | 4            |
-|usbh_hid.c     |  930           | 4            |
-|usbh_hub.c     |  3878          | 14           |
+|   file        |  FLASH (Byte)  |  No Cache RAM (Byte)            |  RAM (Byte)                 |  Heap (Byte)                    |
+|:-------------:|:--------------:|:-------------------------------:|:---------------------------:|:-------------------------------:|
+|usbh_core.c    |  4261          | 512                             | 28                          | sizeof(struct usbh_urb)         |
+|usbh_hub.c     |  4633          | sizeof(struct usbh_hub) * (1+n) | sizeof(struct usbh_hubport) + 20 | 0                          |
+|usbh_cdc_acm.c |  1004          | 7                               | 4                           | sizeof(struct usbh_cdc_acm) * x |
+|usbh_msc.c     |  1776          | 32                              | 4                           | sizeof(struct usbh_msc) * x     |
+|usbh_hid.c     |  822           | 128                             | 4                           | sizeof(struct usbh_hid) * x     |
+
+Among them, `sizeof(struct usbh_hub)` and `sizeof(struct usbh_hubport)` are affected by the following macros：
+
+```
+#define CONFIG_USBHOST_MAX_EXTHUBS          1
+#define CONFIG_USBHOST_MAX_EHPORTS          4
+#define CONFIG_USBHOST_MAX_INTERFACES       6
+#define CONFIG_USBHOST_MAX_INTF_ALTSETTINGS 1
+#define CONFIG_USBHOST_MAX_ENDPOINTS        4
+```
 
 ## Documentation Tutorial
 
@@ -128,6 +140,7 @@ Note: After version 0.4.1, the dcd drivers have been refactored and some reposit
 |ST    |  STM32F4 | dwc2 |[stm32f429_device_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32f429igt6)   [stm32f429_host_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_host/stm32f429igt6)|latest |
 |ST    |  STM32H7 | dwc2 |[stm32h743_device_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32h743vbt6)   [stm32h743_host_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_host/stm32h743xih6)|latest |
 |HPMicro    |  HPM6750 | hpm/ehci |[hpm_repo](https://github.com/CherryUSB/cherryusb_hpmicro)|latest |
+|Phytium |  e2000 | xhci |[phytium _repo](https://gitee.com/phytium_embedded/phytium-standalone-sdk)|latest |
 |WCH    |  CH32V307 | ch32_usbfs/ch32_usbhs|[ch32v307_repo](https://github.com/CherryUSB/cherryusb_ch32v307)|latest |
 |WCH    |  CH57x | ch58x |[ch57x_repo](https://github.com/CherryUSB/cherryusb_ch57x)|v0.4.1 |
 |Nuvoton    |  Nuc442 | nuvoton |[nuc442_repo](https://github.com/CherryUSB/cherryusb_nuc442)|v0.4.1 |

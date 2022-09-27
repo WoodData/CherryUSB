@@ -4,16 +4,17 @@
 
 CherryUSB 是一个小而美的、可移植性高的、用于嵌入式系统(带 USB ip)的 USB 主从协议栈。
 
-![CherryUSB](./docs/asserts/usb_outline.png)
+![CherryUSB](./docs/assets/usb_outline.png)
 
 ## 为什么选择
 
-- 比较全面的 class 驱动，并且 class 驱动全部模板化，方便学习和自主添加
-- 树状化编程，方便理清 class 驱动与接口、端点的关系，hub、port、class 之间的关系；代码层层递进，调用关系一目了然，方便理清 usb 枚举过程和 class 驱动加载
-- 设备协议栈使用等价于 uart tx/rx dma 的使用，主机协议栈的使用等价于文件的使用
-- 标准化的 porting 接口，同时面向 ip 化编程，相同 ip 无需重复编写驱动
-- Api 少，分类清晰：dcd/hcd api、注册 api、命令回调 api
-- 协议栈代码精简，内存占用极小，ip 驱动代码也做到精简，能够达到 usb 硬件理论带宽
+- 代码精简，并且内存占用极小，详细参考下面表格，而且还可进一步的裁剪
+- 全面的 class 驱动，并且主从 class 驱动全部模板化，方便用户增加新的 class 驱动以及学习的时候查找规律
+- 可供用户使用的 API 非常少，并且分类清晰。从机：初始化 + 注册类、命令回调类、数据收发类；主机：初始化 + 查找类、数据收发类
+- 树状化编程，代码层层递进，方便用户理清函数调用关系、枚举和 class 驱动加载过程
+- 标准化的 porting 接口，相同 ip 无需重写驱动，并且 porting 驱动也进行了模板化，方便用户新增 porting。
+- 主从收发接口的使用等价于 uart tx/rx dma 的使用，长度也没有限制
+- 能够达到 USB 硬件理论带宽
 
 ## 目录结构
 
@@ -65,14 +66,14 @@ CherryUSB Device 协议栈当前实现以下功能：
 
 CherryUSB Device 协议栈资源占用说明（GCC 10.2 with -O2）：
 
-|   file      |  FLASH (Byte)  |  RAM (Byte)  |
-|:-----------:|:--------------:|:------------:|
-|usbd_core.c  |  3045          | 373          |
-|usbd_cdc.c   |  302           | 20           |
-|usbd_msc.c   |  2452          | 132          |
-|usbd_hid.c   |  784           | 201          |
-|usbd_audio.c |  438           | 14           |
-|usbd_video.c |  402           | 4            |
+|   file        |  FLASH (Byte)  |  No Cache RAM (Byte)      |  RAM (Byte)   |  Heap (Byte)                      |
+|:-------------:|:--------------:|:-------------------------:|:-------------:|:---------------------------------:|
+|usbd_core.c    |  3263          | 384                       | 17            | 0                                 |
+|usbd_cdc.c     |  490           | 0                         | 0             | sizeof(struct usbd_interface) * x |
+|usbd_msc.c     |  2772          | 128 + 512(default)        | 16            | sizeof(struct usbd_interface) * x |
+|usbd_hid.c     |  501           | 0                         | 0             | sizeof(struct usbd_interface) * x |
+|usbd_audio.c   |  1208          | 0                         | 4             | sizeof(struct usbd_interface) * x |
+|usbd_video.c   |  2272          | 0                         | 82            | sizeof(struct usbd_interface) * x |
 
 ## Host 协议栈简介
 
@@ -87,6 +88,7 @@ CherryUSB Host 协议栈当前实现以下功能：
 - 支持 Communication Device Class (CDC)
 - 支持 Human Interface Device (HID)
 - 支持 Mass Storage Class (MSC)
+- 支持 USB VIDEO CLASS (UVC1.0, only supports ehci)
 - 支持 Remote NDIS (RNDIS)
 - 支持 Vendor 类 class
 
@@ -94,13 +96,23 @@ CherryUSB Host 协议栈当前实现以下功能：
 
 CherryUSB Host 协议栈资源占用说明（GCC 10.2 with -O2）：
 
-|   file        |  FLASH (Byte)  |  RAM (Byte)  |
-|:-------------:|:--------------:|:------------:|
-|usbh_core.c    |  7992          | 472          |
-|usbh_cdc_acm.c |  1208          | 4            |
-|usbh_msc.c     |  2239          | 4            |
-|usbh_hid.c     |  930           | 4            |
-|usbh_hub.c     |  3878          | 14           |
+|   file        |  FLASH (Byte)  |  No Cache RAM (Byte)            |  RAM (Byte)                 |  Heap (Byte)                    |
+|:-------------:|:--------------:|:-------------------------------:|:---------------------------:|:-------------------------------:|
+|usbh_core.c    |  4261          | 512                             | 28                          | sizeof(struct usbh_urb)         |
+|usbh_hub.c     |  4633          | sizeof(struct usbh_hub) * (1+n) | sizeof(struct usbh_hubport) + 20 | 0                          |
+|usbh_cdc_acm.c |  1004          | 7                               | 4                           | sizeof(struct usbh_cdc_acm) * x |
+|usbh_msc.c     |  1776          | 32                              | 4                           | sizeof(struct usbh_msc) * x     |
+|usbh_hid.c     |  822           | 128                             | 4                           | sizeof(struct usbh_hid) * x     |
+
+其中，`sizeof(struct usbh_hub)` 和 `sizeof(struct usbh_hubport)` 受以下宏影响：
+
+```
+#define CONFIG_USBHOST_MAX_EXTHUBS          1
+#define CONFIG_USBHOST_MAX_EHPORTS          4
+#define CONFIG_USBHOST_MAX_INTERFACES       6
+#define CONFIG_USBHOST_MAX_INTF_ALTSETTINGS 1
+#define CONFIG_USBHOST_MAX_ENDPOINTS        4
+```
 
 ## 文档教程
 
@@ -127,6 +139,7 @@ USB 基本知识点与 CherryUSB Device 协议栈是如何编写的，参考 [Ch
 |ST    |  STM32F4 | dwc2 |[stm32f429_device_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32f429igt6)   [stm32f429_host_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_host/stm32f429igt6)|latest |
 |ST    |  STM32H7 | dwc2 |[stm32h743_device_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_device/stm32h743vbt6)   [stm32h743_host_repo](https://github.com/sakumisu/CherryUSB/tree/master/demo/stm32/usb_host/stm32h743xih6)|latest |
 |HPMicro    |  HPM6750 | hpm/ehci |[hpm_repo](https://github.com/CherryUSB/cherryusb_hpmicro)|latest |
+|Phytium |  e2000 | xhci |[phytium _repo](https://gitee.com/phytium_embedded/phytium-standalone-sdk)|latest |
 |WCH    |  CH32V307 | ch32_usbfs/ch32_usbhs|[ch32v307_repo](https://github.com/CherryUSB/cherryusb_ch32v307)|latest |
 |WCH    |  CH57x | ch58x |[ch57x_repo](https://github.com/CherryUSB/cherryusb_ch57x)|v0.4.1 |
 |Nuvoton    |  Nuc442 | nuvoton |[nuc442_repo](https://github.com/CherryUSB/cherryusb_nuc442)|v0.4.1 |
